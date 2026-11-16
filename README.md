@@ -130,6 +130,19 @@ Fake peer behaviours ([`tests/bad_peers.rs`](tests/bad_peers.rs), [`tests/downlo
 
 ### Live tests (by hand)
 
+**Result, 2026-11-16:** `debian-13.7.0-amd64-netinst.iso` (756 MiB, 3024 pieces) downloaded from the public swarm via `bttracker.debian.org`. The file's SHA-256 (`a7ef94ac…e355`) matched Debian's `SHA256SUMS`.
+
+| Measure | Value |
+|---|---|
+| Total time | 226 s, about 3.3 MiB/s on average and 4.2 MiB/s at the end, on a home connection |
+| Peers | 50 from the tracker; 14 to 18 connected |
+| Time to first verified piece | About 4 s (target under 10 s) |
+| Peak memory | 15.7 MB |
+| Failed pieces | 0. 758.6 MiB was received for a 756 MiB file; the extra 2.6 MiB is endgame duplicates. |
+| Exit code | 0 |
+
+Steps:
+
 1. Download a current Debian netinst image and compare it with the `SHA256SUMS` on debian.org:
    ```bash
    oxtorrent download debian-13.x.x-amd64-netinst.iso.torrent --output /tmp/deb
@@ -164,9 +177,10 @@ The output's SHA-1 matched every time. The seeder peaked at 7.4 MB.
 
 | Target (spec) | Status |
 |---|---|
-| ≥ 80% of Transmission's speed on a live torrent | Not measured yet (manual live test) |
+| ≥ 80% of Transmission's speed on a live torrent | Oxtorrent alone: 3.3 MiB/s on Debian 13.7 netinst (see Live tests). Transmission not measured yet |
+| Time to first piece < 10 s on a healthy swarm | About 4 s on the Debian swarm |
 | Localhost limited by disk, not by the client | About 35 MiB/s with the default pipeline of 5; not yet profiled |
-| < 150 MB memory with 50 peers and 4 MB pieces | 11 MB with 1 peer and 256 KiB pieces; buffers are capped at 16 pieces |
+| < 150 MB memory with 50 peers and 4 MB pieces | 15.7 MB live with 18 peers and 256 KiB pieces; buffers are capped at 16 pieces |
 | Shutdown < 2 s after Ctrl-C | Covered by tests (shutdown within 3 s, tracker `stopped` timeout 1.5 s) |
 
 Likely next optimisations: the picker scans every piece when it starts a new one (a sorted rarity structure would avoid that), and the codec test copies the input buffer once per run.
