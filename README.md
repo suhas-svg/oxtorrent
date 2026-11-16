@@ -141,6 +141,15 @@ Fake peer behaviours ([`tests/bad_peers.rs`](tests/bad_peers.rs), [`tests/downlo
 | Failed pieces | 0. 758.6 MiB was received for a 756 MiB file; the extra 2.6 MiB is endgame duplicates. |
 | Exit code | 0 |
 
+**Comparison with Transmission 4.1.3, 2026-11-16.** Same torrent and network, runs alternating Transmission, Oxtorrent, three rounds, each from an empty folder. Transmission ran as `transmission-daemon` with DHT, PEX, LPD and uTP off and 50 peers per torrent, so both clients found peers only through the tracker. All six outputs matched Debian's SHA-256.
+
+| | Run 1 | Run 2 | Run 3 | Average | Peak memory |
+|---|---|---|---|---|---|
+| Transmission | 157.4 s | 112.9 s | 117.2 s | 129.2 s (5.85 MiB/s) | ~35 MB |
+| Oxtorrent | 247.6 s | 243.9 s | 145.9 s | 212.5 s (3.56 MiB/s) | ~15.6 MB |
+
+That puts Oxtorrent at **61%** of Transmission's speed, short of the 80% target. Likely causes, in the order to check them: a fixed pipeline of 5 requests per peer (Transmission sizes its queue from each peer's rate), fewer connected peers (14 to 18 of the 50 returned), and unproductive peers that are dropped only after 90 s.
+
 Steps:
 
 1. Download a current Debian netinst image and compare it with the `SHA256SUMS` on debian.org:
@@ -177,7 +186,7 @@ The output's SHA-1 matched every time. The seeder peaked at 7.4 MB.
 
 | Target (spec) | Status |
 |---|---|
-| ≥ 80% of Transmission's speed on a live torrent | Oxtorrent alone: 3.3 MiB/s on Debian 13.7 netinst (see Live tests). Transmission not measured yet |
+| ≥ 80% of Transmission's speed on a live torrent | **Not met yet: 61%** (see below) |
 | Time to first piece < 10 s on a healthy swarm | About 4 s on the Debian swarm |
 | Localhost limited by disk, not by the client | About 35 MiB/s with the default pipeline of 5; not yet profiled |
 | < 150 MB memory with 50 peers and 4 MB pieces | 15.7 MB live with 18 peers and 256 KiB pieces; buffers are capped at 16 pieces |
