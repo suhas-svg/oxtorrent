@@ -90,3 +90,71 @@ pub async fn spawn(fixed: Vec<SocketAddr>) -> FakeTracker {
         announces,
     }
 }
+
+/// The same tracker over UDP (BEP 15). `announces` records the event names.
+#[allow(dead_code)]
+pub async fn spawn_udp(fixed: Vec<SocketAddr>) -> FakeTracker {
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    let announced: Arc<Mutex<Vec<SocketAddr>>> = Arc::default();
+    let announces: Arc<Mutex<Vec<String>>> = Arc::default();
+    let (reg, log) = (announced.clone(), announces.clone());
+    tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        loop {
+            let Ok((n, from)) = sock.recv_from(&mut buf).await else {
+                break;
+            };
+            let p = &buf[..n];
+            if n < 16 {
+                continue;
+            }
+            let action = u32::from_be_bytes([p[8], p[9], p[10], p[11]]);
+            let mut reply = Vec::new();
+            match action {
+                0 => {
+                    reply.extend_from_slice(&[0, 0, 0, 0]);
+                    reply.extend_from_slice(&p[12..16]);
+                    reply.extend_from_slice(&0x5eed_u64.to_be_bytes());
+                }
+                1 if n >= 98 => {
+                    let event = match u32::from_be_bytes([p[80], p[81], p[82], p[83]]) {
+                        1 => "completed",
+                        2 => "started",
+                        3 => "stopped",
+                        _ => "",
+                    };
+                    let port = u16::from_be_bytes([p[96], p[97]]);
+                    let me = SocketAddr::from(([127, 0, 0, 1], port));
+                    log.lock().unwrap().push(event.to_string());
+                    {
+                        let mut r = reg.lock().unwrap();
+                        if event == "stopped" {
+                            r.retain(|a| *a != me);
+                        } else if !r.contains(&me) {
+                            r.push(me);
+                        }
+                    }
+                    reply.extend_from_slice(&[0, 0, 0, 1]);
+                    reply.extend_from_slice(&p[12..16]);
+                    reply.extend_from_slice(&[0, 0, 0x07, 0x08, 0, 0, 0, 0, 0, 0, 0, 0]);
+                    for a in fixed.iter().chain(reg.lock().unwrap().iter()) {
+                        if let SocketAddr::V4(v4) = a {
+                            if *a != me {
+                                reply.extend_from_slice(&v4.ip().octets());
+                                reply.extend_from_slice(&v4.port().to_be_bytes());
+                            }
+                        }
+                    }
+                }
+                _ => continue,
+            }
+            let _ = sock.send_to(&reply, from).await;
+        }
+    });
+    FakeTracker {
+        url: format!("udp://{addr}/announce"),
+        announced,
+        announces,
+    }
+}

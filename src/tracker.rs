@@ -1,5 +1,7 @@
-//! HTTP tracker announces: building the request URL, parsing the reply, and
-//! the tracker task that announces on a timer.
+//! Tracker announces over HTTP (BEP 3, BEP 23) and UDP (BEP 15), and the
+//! tracker task that announces on a timer.
+
+pub mod udp;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
@@ -43,6 +45,10 @@ pub enum TrackerError {
     UnsupportedScheme(String),
     #[error("no usable tracker")]
     NoTracker,
+    #[error("network error: {0}")]
+    Io(std::io::Error),
+    #[error("tracker did not answer")]
+    Timeout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,20 +169,38 @@ pub fn parse_response(body: &[u8]) -> Result<AnnounceResponse, TrackerError> {
     })
 }
 
-pub async fn announce(
-    client: &reqwest::Client,
-    base: &str,
-    req: &AnnounceRequest,
-) -> Result<AnnounceResponse, TrackerError> {
-    if !(base.starts_with("http://") || base.starts_with("https://")) {
-        return Err(TrackerError::UnsupportedScheme(base.to_string()));
+/// Announces over HTTP(S) or UDP depending on the URL scheme.
+pub struct Announcer {
+    http: reqwest::Client,
+    udp: udp::UdpClient,
+}
+
+impl Announcer {
+    pub fn new(http: reqwest::Client, retransmit: udp::Retransmit) -> Self {
+        Announcer {
+            http,
+            udp: udp::UdpClient::new(retransmit),
+        }
     }
-    let resp = client.get(build_url(base, req)).send().await?;
-    if !resp.status().is_success() {
-        return Err(TrackerError::Status(resp.status().as_u16()));
+
+    pub async fn announce(
+        &mut self,
+        base: &str,
+        req: &AnnounceRequest,
+    ) -> Result<AnnounceResponse, TrackerError> {
+        if base.starts_with("udp://") {
+            return self.udp.announce(base, req).await;
+        }
+        if !(base.starts_with("http://") || base.starts_with("https://")) {
+            return Err(TrackerError::UnsupportedScheme(base.to_string()));
+        }
+        let resp = self.http.get(build_url(base, req)).send().await?;
+        if !resp.status().is_success() {
+            return Err(TrackerError::Status(resp.status().as_u16()));
+        }
+        let body = resp.bytes().await?;
+        parse_response(&body)
     }
-    let body = resp.bytes().await?;
-    parse_response(&body)
 }
 
 pub struct TrackerConfig {
@@ -184,24 +208,26 @@ pub struct TrackerConfig {
     pub info_hash: [u8; 20],
     pub peer_id: [u8; 20],
     pub port: u16,
+    /// UDP retransmission policy; tests shorten it.
+    pub udp_retransmit: udp::Retransmit,
 }
 
 /// Tries each URL in order; a URL that works is moved to the front (BEP 12).
 async fn announce_any(
-    client: &reqwest::Client,
+    client: &mut Announcer,
     urls: &mut Vec<String>,
     req: &AnnounceRequest,
 ) -> Result<AnnounceResponse, TrackerError> {
     let mut last = TrackerError::NoTracker;
     for i in 0..urls.len() {
-        match announce(client, &urls[i], req).await {
+        match client.announce(&urls[i], req).await {
             Ok(resp) => {
                 let url = urls.remove(i);
                 urls.insert(0, url);
                 return Ok(resp);
             }
             Err(TrackerError::UnsupportedScheme(u)) => {
-                debug!("skipping tracker {u}: only HTTP trackers are supported");
+                debug!("skipping tracker {u}: unsupported scheme");
             }
             Err(e) => {
                 debug!("tracker {} failed: {e}", urls[i]);
@@ -221,7 +247,7 @@ pub async fn run_tracker(
     events: mpsc::Sender<SessionEvent>,
     token: CancellationToken,
 ) {
-    let client = match reqwest::Client::builder()
+    let http = match reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .user_agent(concat!("Oxtorrent/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -232,6 +258,7 @@ pub async fn run_tracker(
             return;
         }
     };
+    let mut client = Announcer::new(http, cfg.udp_retransmit);
 
     let make_req = |p: &Progress, event| AnnounceRequest {
         info_hash: cfg.info_hash,
@@ -251,7 +278,7 @@ pub async fn run_tracker(
     'outer: loop {
         let req = make_req(&progress.borrow(), event);
         let result = tokio::select! {
-            r = announce_any(&client, &mut cfg.urls, &req) => r,
+            r = announce_any(&mut client, &mut cfg.urls, &req) => r,
             _ = token.cancelled() => break 'outer,
         };
         let wait = match result {
@@ -301,7 +328,7 @@ pub async fn run_tracker(
 
     if announced {
         let req = make_req(&progress.borrow(), Some(Event::Stopped));
-        if timeout(STOP_TIMEOUT, announce_any(&client, &mut cfg.urls, &req))
+        if timeout(STOP_TIMEOUT, announce_any(&mut client, &mut cfg.urls, &req))
             .await
             .is_err()
         {

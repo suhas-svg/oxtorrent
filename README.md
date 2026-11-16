@@ -75,7 +75,7 @@ All channels are bounded. The session never waits on a peer: it uses `try_send`,
 |---|---|
 | [`bencode`](src/bencode.rs) | Parse and write bencode. It records the byte span of the top-level values, so the info hash is taken over the original bytes. |
 | [`metainfo`](src/metainfo.rs) | Typed `Torrent`, info hash, piece and block size arithmetic, path safety checks |
-| [`tracker`](src/tracker.rs) | Announce URL building, reply parsing (compact, dictionary and IPv6 forms) and the tracker task |
+| [`tracker`](src/tracker.rs) | HTTP announces (URL building, reply parsing in compact, dictionary and IPv6 forms), [UDP announces](src/tracker/udp.rs) (BEP 15: connect / announce, cached connection IDs, retransmission at 3, 6 and 12 s), and the tracker task |
 | [`peer::handshake`](src/peer/handshake.rs) | The 68-byte opening exchange |
 | [`peer::message`](src/peer/message.rs) | `Message` enum and the `tokio_util` codec, with a hard size cap |
 | [`peer::connection`](src/peer/connection.rs) | The per-peer task: timeouts, keep-alives, batching of outgoing messages |
@@ -275,12 +275,14 @@ These point the same way as the 2006 measurement study: rarest first keeps piece
 
 ## Scope
 
-Version 1 includes: single-file and multi-file torrents, HTTP(S) trackers with announce-list, download and upload over TCP, SHA-1 verification, rarest first, endgame, tit-for-tat choking, resume, and the progress line.
+Version 1 includes: single-file and multi-file torrents, HTTP(S) and UDP trackers with announce-list, download and upload over TCP, SHA-1 verification, rarest first, endgame, tit-for-tat choking, resume, and the progress line.
 
-Not yet built (stretch goals, in order): UDP trackers (BEP 15), the extension protocol (BEP 10), magnet links (BEP 9), DHT (BEP 5), a terminal dashboard, several torrents at once, and speed limits.
+UDP trackers (BEP 15), the first stretch goal, are done. `cargo test --test live_udp -- --ignored --nocapture` announces to a public UDP tracker; on 2026-11-16 `tracker.opentrackr.org:1337` returned 200 peers for the Debian image in 0.6 s.
+
+Not yet built (remaining stretch goals, in order): the extension protocol (BEP 10), magnet links (BEP 9), DHT (BEP 5), a terminal dashboard, several torrents at once, and speed limits.
 
 ## Reference
 
 - [BEP 3: The BitTorrent Protocol Specification](https://www.bittorrent.org/beps/bep_0003.html)
-- [BEP 12: Multitracker Metadata Extension](https://www.bittorrent.org/beps/bep_0012.html), [BEP 20: Peer ID Conventions](https://www.bittorrent.org/beps/bep_0020.html), [BEP 23: Compact peer lists](https://www.bittorrent.org/beps/bep_0023.html)
+- [BEP 12: Multitracker Metadata Extension](https://www.bittorrent.org/beps/bep_0012.html), [BEP 15: UDP Tracker Protocol](https://www.bittorrent.org/beps/bep_0015.html), [BEP 20: Peer ID Conventions](https://www.bittorrent.org/beps/bep_0020.html), [BEP 23: Compact peer lists](https://www.bittorrent.org/beps/bep_0023.html)
 - Legout, Urvoy-Keller, Michiardi: *Rarest First and Choke Algorithms Are Enough* (IMC 2006)

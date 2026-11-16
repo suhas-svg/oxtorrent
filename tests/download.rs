@@ -60,6 +60,35 @@ async fn honest_seeder_download_matches_byte_for_byte() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn downloads_with_peers_from_a_udp_tracker() {
+    let data = Arc::new(make_data(300 * 1024, 6));
+    let probe = Torrent::from_bytes(&build_single_file("u.bin", &data, PIECE, None)).unwrap();
+    let peer = fake_peer::spawn(data.clone(), PIECE, probe.info_hash, Behaviour::Honest).await;
+    let tracker = fake_tracker::spawn_udp(vec![peer.addr]).await;
+    let torrent = Torrent::from_bytes(&build_single_file(
+        "u.bin",
+        &data,
+        PIECE,
+        Some(&tracker.url),
+    ))
+    .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = run_client_within(
+        Duration::from_secs(60),
+        torrent,
+        dir.path(),
+        fast_timeouts(),
+    )
+    .await;
+    assert!(outcome.complete);
+    assert_eq!(std::fs::read(dir.path().join("u.bin")).unwrap(), *data);
+    let events = tracker.announces.lock().unwrap().clone();
+    assert_eq!(events.first().map(String::as_str), Some("started"));
+    assert!(events.iter().any(|e| e == "stopped"), "events: {events:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn partial_file_resumes_and_fetches_only_missing_pieces() {
     let data = Arc::new(make_data(512 * 1024 + 123, 2));
     let probe = Torrent::from_bytes(&build_single_file("p.bin", &data, PIECE, None)).unwrap();

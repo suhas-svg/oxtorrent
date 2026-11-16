@@ -255,6 +255,7 @@ pub async fn run_download(
             info_hash: torrent.info_hash,
             peer_id: config.peer_id,
             port: config.port,
+            udp_retransmit: Default::default(),
         };
         tracker_task = Some(tokio::spawn(tracker::run_tracker(
             cfg,
