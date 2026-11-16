@@ -32,6 +32,29 @@ const RETRY_DELAY: Duration = Duration::from_secs(30);
 const MAX_ATTEMPTS: u32 = 5;
 const CHOKE_INTERVAL: Duration = Duration::from_secs(10);
 const PEER_QUEUE: usize = 512;
+/// Seconds of a peer's measured download rate to keep requested ahead.
+const REQUEST_QUEUE_SECS: f64 = 3.0;
+/// Most block requests outstanding to one peer. Many clients drop
+/// requests beyond a few hundred, so stay well under that.
+const MAX_QUEUE_DEPTH: usize = 128;
+/// Weight of the old value in the per-second rate average.
+const RATE_SMOOTHING: f64 = 0.6;
+/// Memory allowed for buffered pieces in progress.
+const MAX_BUFFERED_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Requests to keep outstanding for a peer: enough to cover
+/// [`REQUEST_QUEUE_SECS`] of its measured rate, never fewer than `min`
+/// (the `--pipeline` option) and never more than [`MAX_QUEUE_DEPTH`].
+pub fn queue_depth(rate: f64, min: usize) -> usize {
+    let want = (rate.max(0.0) * REQUEST_QUEUE_SECS / crate::BLOCK_SIZE as f64).ceil() as usize;
+    want.clamp(min, MAX_QUEUE_DEPTH.max(min))
+}
+
+/// Pieces that may be in progress at once: as many as fit in
+/// [`MAX_BUFFERED_BYTES`], and at least `min`.
+pub fn max_in_progress(min: usize, piece_length: u64) -> usize {
+    ((MAX_BUFFERED_BYTES / piece_length.max(1)) as usize).max(min)
+}
 const EVENT_QUEUE: usize = 1024;
 const DISK_QUEUE: usize = 256;
 
@@ -148,6 +171,10 @@ struct Peer {
     dl_prev: u64,
     ul_cur: u64,
     ul_prev: u64,
+    /// Bytes received since the last one-second tick, and a smoothed
+    /// bytes-per-second estimate that sizes the request queue.
+    dl_second: u64,
+    dl_rate: f64,
 }
 
 impl Peer {
@@ -167,6 +194,8 @@ impl Peer {
             dl_prev: 0,
             ul_cur: 0,
             ul_prev: 0,
+            dl_second: 0,
+            dl_rate: 0.0,
         }
     }
 }
@@ -324,7 +353,7 @@ impl Session {
             torrent.total_length,
             torrent.piece_length,
             &have,
-            config.max_in_progress,
+            max_in_progress(config.max_in_progress, torrent.piece_length),
             Box::new(RarestFirst::from_entropy()),
         );
         Session {
@@ -575,6 +604,7 @@ impl Session {
             Message::Piece { index, begin, data } => {
                 let len = data.len() as u64;
                 peer.dl_cur += len;
+                peer.dl_second += len;
                 self.downloaded += len;
                 let from = peer.addr;
                 match self
@@ -789,7 +819,7 @@ impl Session {
         );
     }
 
-    /// Tops up the peer's outstanding requests to the pipeline depth.
+    /// Tops up the peer's outstanding requests to its queue depth.
     fn fill(&mut self, key: PeerKey) {
         if self.complete {
             return;
@@ -800,16 +830,19 @@ impl Session {
         if !p.connected || p.peer_choking || !p.am_interested {
             return;
         }
+        // In endgame every request may be a duplicate, so keep it shallow.
+        let depth = if self.picker.in_endgame() {
+            self.config.pipeline
+        } else {
+            queue_depth(p.dl_rate, self.config.pipeline)
+        };
         let have = self.picker.outstanding(key);
-        if have >= self.config.pipeline {
+        if have >= depth {
             return;
         }
-        let reqs = self.picker.next_requests(
-            key,
-            &p.bitfield,
-            self.config.pipeline - have,
-            std::time::Instant::now(),
-        );
+        let reqs =
+            self.picker
+                .next_requests(key, &p.bitfield, depth - have, std::time::Instant::now());
         for r in reqs {
             if !self.send(
                 key,
@@ -833,6 +866,11 @@ impl Session {
 
     fn on_tick(&mut self) {
         let now = Instant::now();
+
+        for p in self.peers.values_mut() {
+            let second = std::mem::take(&mut p.dl_second) as f64;
+            p.dl_rate = RATE_SMOOTHING * p.dl_rate + (1.0 - RATE_SMOOTHING) * second;
+        }
 
         // Requests that have waited too long go back to the pool.
         let expired = self
@@ -963,5 +1001,28 @@ impl Session {
         }
         self.peers.clear();
         self.progress_tx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_depth_follows_rate() {
+        assert_eq!(queue_depth(0.0, 5), 5);
+        // 1 MiB/s for 3 s is 192 blocks, capped at 128.
+        assert_eq!(queue_depth(1024.0 * 1024.0, 5), 128);
+        // 100 KiB/s for 3 s is 18.75 blocks, rounded up.
+        assert_eq!(queue_depth(100.0 * 1024.0, 5), 19);
+        // The minimum wins, even above the cap.
+        assert_eq!(queue_depth(0.0, 200), 200);
+    }
+
+    #[test]
+    fn in_progress_cap_is_by_memory() {
+        assert_eq!(max_in_progress(16, 4 * 1024 * 1024), 16);
+        assert_eq!(max_in_progress(16, 256 * 1024), 256);
+        assert_eq!(max_in_progress(16, 64 * 1024 * 1024), 16);
     }
 }

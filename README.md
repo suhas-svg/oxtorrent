@@ -29,7 +29,7 @@ target/release/oxtorrent download debian.iso.torrent --output ~/Downloads --seed
 | `--port <n>` | 6881 | TCP port for incoming peers |
 | `--max-peers <n>` | 50 | Maximum simultaneous connections, incoming and outgoing together |
 | `--seed` | off | Keep uploading after the download completes |
-| `--pipeline <n>` | 5 | Outstanding block requests per peer |
+| `--pipeline <n>` | 5 | Minimum outstanding block requests per peer; each peer's queue grows to about 3 s of its measured rate (up to 128 blocks) |
 | `--peer <ip:port>` | none | Extra peer to dial; may be repeated (useful on a LAN) |
 | `-v`, `-vv`, `-vvv` | off | Info, debug or trace logs on standard error |
 
@@ -89,7 +89,7 @@ All channels are bounded. The session never waits on a peer: it uses `try_send`,
 ### Design notes
 
 - **Message passing, not shared locks.** Exactly one task changes piece state. That rules out lock-ordering bugs and data races, and the coordinator handling events one at a time is fine at 50 to 200 peers.
-- **Whole pieces are buffered in memory.** A piece is hashed before it is written, so unverified data never reaches the output file. At most 16 pieces are in progress at once, which caps buffers at 64 MB with 4 MB pieces.
+- **Whole pieces are buffered in memory.** A piece is hashed before it is written, so unverified data never reaches the output file. The number of pieces in progress is capped by memory: 64 MiB of piece buffers (16 pieces at 4 MiB, 256 at 256 KiB), with a floor of 16 pieces.
 - **Hashing runs off the async threads.** The disk task runs on Tokio's blocking pool, so SHA-1 never stalls the threads that drive sockets.
 - **Bad-data attribution.** When a piece fails its hash check, the disk task records a hash of each block and who sent it. If one peer sent the whole piece, that peer gets a strike straight away. Otherwise strikes wait until a good copy verifies, and then go only to peers whose blocks differ from it. A peer with 3 strikes is banned. An honest peer that shared a piece with a corrupt one is never punished.
 
@@ -150,6 +150,8 @@ Fake peer behaviours ([`tests/bad_peers.rs`](tests/bad_peers.rs), [`tests/downlo
 
 That puts Oxtorrent at **61%** of Transmission's speed, short of the 80% target. Likely causes, in the order to check them: a fixed pipeline of 5 requests per peer (Transmission sizes its queue from each peer's rate), fewer connected peers (14 to 18 of the 50 returned), and unproductive peers that are dropped only after 90 s.
 
+Since then the first cause has been addressed: each peer's request queue now follows its smoothed download rate (about 3 s of data, 5 to 128 blocks), and the in-progress cap is set by memory rather than a fixed 16 pieces, which with 256 KiB pieces had allowed only 256 blocks in flight across the whole swarm. A re-run of the comparison on 2026-11-16 was abandoned because Debian's tracker stopped accepting connections partway through, so the 61% figure above has not been re-measured yet.
+
 Steps:
 
 1. Download a current Debian netinst image and compare it with the `SHA256SUMS` on debian.org:
@@ -189,7 +191,7 @@ The output's SHA-1 matched every time. The seeder peaked at 7.4 MB.
 | ≥ 80% of Transmission's speed on a live torrent | **Not met yet: 61%** (see below) |
 | Time to first piece < 10 s on a healthy swarm | About 4 s on the Debian swarm |
 | Localhost limited by disk, not by the client | About 35 MiB/s with the default pipeline of 5; not yet profiled |
-| < 150 MB memory with 50 peers and 4 MB pieces | 15.7 MB live with 18 peers and 256 KiB pieces; buffers are capped at 16 pieces |
+| < 150 MB memory with 50 peers and 4 MB pieces | 15.7 MB live with 18 peers and 256 KiB pieces; buffers are capped at 64 MiB |
 | Shutdown < 2 s after Ctrl-C | Covered by tests (shutdown within 3 s, tracker `stopped` timeout 1.5 s) |
 
 Likely next optimisations: the picker scans every piece when it starts a new one (a sorted rarity structure would avoid that), and the codec test copies the input buffer once per run.

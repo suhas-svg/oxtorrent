@@ -51,7 +51,8 @@ enum Command {
         /// Keep uploading after the download completes (until Ctrl-C).
         #[arg(long)]
         seed: bool,
-        /// Outstanding block requests per peer.
+        /// Minimum outstanding block requests per peer; the queue grows
+        /// with each peer's measured speed.
         #[arg(long, default_value_t = 5)]
         pipeline: usize,
         /// Extra peer to connect to (ip:port); may be repeated.
