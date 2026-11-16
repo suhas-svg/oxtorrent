@@ -1,0 +1,26 @@
+# Experiment 1: does rarest first beat random and sequential?
+# Run once per piece strategy, e.g.
+#   oxtorrent simulate --scenario scenarios/piece_strategies.toml --runs 20 \
+#     --piece-strategy sequential --out results/exp1_sequential.csv
+name = "piece_strategies"
+file_size = 67108864        # 64 MiB
+piece_size = 262144         # 256 KiB -> 256 pieces
+piece_strategy = "rarest_first"
+choke_strategy = "tit_for_tat"
+upload_slots = 4
+max_neighbors = 40
+
+[[groups]]
+name = "seeder"
+count = 1
+upload_speed = 1048576      # 1 MiB/s
+download_speed = 1048576
+seed = true
+
+[[groups]]
+name = "downloader"
+count = 200
+upload_speed = 131072       # 128 KiB/s
+download_speed = 1048576    # 1 MiB/s
+join_start = 0.0
+join_end = 300.0

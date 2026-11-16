@@ -1,0 +1,24 @@
+# Experiment 5: how many upload slots are best?
+# Run with --slots 2, 4, 8 and 16 and compare the average download time.
+name = "upload_slots"
+file_size = 67108864
+piece_size = 262144
+piece_strategy = "rarest_first"
+choke_strategy = "tit_for_tat"
+upload_slots = 4
+max_neighbors = 40
+
+[[groups]]
+name = "seeder"
+count = 1
+upload_speed = 1048576
+download_speed = 1048576
+seed = true
+
+[[groups]]
+name = "downloader"
+count = 200
+upload_speed = 131072
+download_speed = 1048576
+join_start = 0.0
+join_end = 300.0

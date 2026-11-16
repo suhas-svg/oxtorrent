@@ -1,0 +1,26 @@
+# Experiment 4: a sudden crowd. 500 downloaders join in the first minute.
+# Look at when the second full copy exists (min_availability >= 2 in
+# --availability-out) and at the average download time.
+name = "flash_crowd"
+file_size = 67108864
+piece_size = 262144
+piece_strategy = "rarest_first"
+choke_strategy = "tit_for_tat"
+upload_slots = 4
+max_neighbors = 40
+sample_interval_secs = 10.0
+
+[[groups]]
+name = "seeder"
+count = 1
+upload_speed = 1048576
+download_speed = 1048576
+seed = true
+
+[[groups]]
+name = "downloader"
+count = 500
+upload_speed = 131072
+download_speed = 1048576
+join_start = 0.0
+join_end = 60.0

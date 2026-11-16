@@ -1,0 +1,33 @@
+# Experiment 3: does tit-for-tat punish peers that never upload?
+# 20% of downloaders upload nothing. Run once per choke strategy and compare
+# the download time of the free riders with that of the uploaders.
+name = "free_riders"
+file_size = 67108864
+piece_size = 262144
+piece_strategy = "rarest_first"
+choke_strategy = "tit_for_tat"
+upload_slots = 4
+max_neighbors = 40
+
+[[groups]]
+name = "seeder"
+count = 1
+upload_speed = 1048576
+download_speed = 1048576
+seed = true
+
+[[groups]]
+name = "uploader"
+count = 160
+upload_speed = 131072
+download_speed = 1048576
+join_start = 0.0
+join_end = 300.0
+
+[[groups]]
+name = "free_rider"
+count = 40
+upload_speed = 0.0
+download_speed = 1048576
+join_start = 0.0
+join_end = 300.0
