@@ -192,6 +192,14 @@ Steps:
    ```
 2. Seed a file to Transmission or qBittorrent on the same network (`--seed`, then add the torrent in the other client with this machine as a peer).
 
+**Seeding to Transmission, 2026-11-17.** A 128 MiB random file in 512 pieces of 256 KiB, its `.torrent` made with `transmission-create` and pointing at a small local tracker. That tracker gave Transmission one peer, Oxtorrent seeding with `--seed`, and gave Oxtorrent none. Transmission 4.1.3 ran as its own `transmission-daemon` with DHT, local peer discovery and uTP off, so Oxtorrent was its only source. Results:
+
+- Transmission downloaded the whole file in about 18 s over the machine's LAN address (peak 9.4 MiB/s upload on Oxtorrent's status line).
+- It reported 134.2 MB downloaded, exactly the file size, and nothing corrupt. A re-verify in Transmission passed, and the copy's SHA-256 matched the original.
+- Transmission identified itself in the extended handshake as "Transmission 4.1.3".
+- Its first connection used an encrypted handshake (MSE), which Oxtorrent does not support. Oxtorrent closed it and Transmission retried in plain BitTorrent at once.
+- Transmission ignored the peer when the tracker gave it as `127.0.0.1`, so the test uses the LAN address.
+
 ## Benchmarks
 
 Measured on the development machine (Windows 11, release build). The localhost and micro-benchmark numbers are first measurements, taken before the rate-based request queue.
