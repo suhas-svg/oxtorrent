@@ -231,7 +231,7 @@ The output's SHA-1 matched every time. The seeder peaked at 7.4 MB.
 | Time to first piece < 10 s on a healthy swarm | About 4 s on the Debian swarm |
 | Localhost limited by disk, not by the client | **Met:** 44 to 55 MiB/s for 1 GiB between two Oxtorrent processes, against 64 MiB/s for an uncached file copy on the same drive; the downloader averaged 0.3 to 0.4 of a core (details below) |
 | < 150 MB memory with 50 peers and 4 MB pieces | 52 to 65 MB peak live with up to 50 peers and 256 KiB pieces; piece buffers are capped at 64 MiB |
-| Shutdown < 2 s after Ctrl-C | **Met without a tracker:** 0.5 to 1.1 s from a real Ctrl-C to exit in three live DHT downloads (details below). With trackers, the `stopped` announce can add up to 1.5 s, which could pass 2 s; not yet measured |
+| Shutdown < 2 s after Ctrl-C | **Met in every run measured:** 0.3 to 1.3 s from a real Ctrl-C to exit in six live downloads, with or without a tracker; 1.5 s when the tracker stops answering (details below). A busy download whose tracker hangs could still pass 2 s |
 
 **Localhost run, 2026-11-17** (Windows 11, Intel i7-8750H, 12 logical cores, one SSD). A 1 GiB random file in 1,024 pieces of 1 MiB, seeded by one Oxtorrent process and downloaded by another with `--peer 127.0.0.1:<port> --no-dht`, both on the same drive:
 
@@ -242,7 +242,7 @@ The output's SHA-1 matched every time. The seeder peaked at 7.4 MB.
 
 Both copies matched the original's SHA-256. For comparison, copying the same file on that drive took 16.1 s (64 MiB/s) and 2.9 s once the file was in the cache, and SHA-1 over it takes 2.9 s on one core. The downloader used about a third of one core on average, so the CPU is not the limit. The download runs at 70 to 85% of an uncached copy, which reads and writes the same drive just as the two clients do. Memory figures are working sets sampled twice a second.
 
-**Shutdown, 2026-11-17.** Three trackerless downloads of the Debian image (peers from the DHT) received Ctrl-C after 25 s, while transferring. They exited, with code 2 and files ready to resume, 1.0 s, 1.1 s and 0.5 s after the signal. A torrent with trackers also sends `stopped`, which waits at most 1.5 s.
+**Shutdown, 2026-11-17.** Three trackerless downloads of the Debian image (peers from the DHT) received Ctrl-C after 25 s, while transferring. They exited, with code 2 and files ready to resume, 1.0 s, 1.1 s and 0.5 s after the signal. Three downloads of the same image with opentrackr (UDP) as their only peer source (`--no-dht`) were stopped the same way after receiving 177 to 209 MiB. They exited 0.5 s, 0.3 s and 1.3 s after the signal, `stopped` announce included. Oxtorrent does not log a successful announce, so whether `stopped` reached opentrackr was checked against a local HTTP tracker that logs every request. That tracker received `started` and then `stopped`, and the client (idle, as that torrent had no seeder) exited within 10 ms. When the tracker stopped answering after `started`, exit took 1.51 and 1.52 s: the client gives the `stopped` announce 1.5 s and then leaves. The worst case not measured is a busy download whose tracker hangs at that moment, which could add the 1.5 s to the 0.3 to 1.3 s above.
 
 Likely next optimisations: the picker scans every piece when it starts a new one (a sorted rarity structure would avoid that), and the codec test copies the input buffer once per run.
 
