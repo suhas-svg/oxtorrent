@@ -10,6 +10,7 @@ readme = "README.md"
 anyhow = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
 csv = "1"
 futures = "0.3"
 percent-encoding = "2"

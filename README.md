@@ -37,9 +37,11 @@ With a magnet link, the client first fetches the torrent's info dictionary from 
 | `--pipeline <n>` | 5 | Minimum outstanding block requests per peer; each peer's queue grows to about 3 s of its measured rate (up to 128 blocks) |
 | `--peer <ip:port>` | none | Extra peer to dial; may be repeated (useful on a LAN) |
 | `--no-dht` | DHT on | Find peers only through trackers and `--peer`. The DHT uses UDP on the same port number as `--port`, and is never used for private torrents (BEP 27). |
+| `--dashboard` | off | Full-screen view instead of the status line (see below). Ignored when standard output is not a terminal. |
 | `-v`, `-vv`, `-vvv` | off | Info, debug or trace logs on standard error |
 
 - `download` prints one status line per second on standard output: percent done, download and upload speed, connected peers and time left. Logs go to standard error, so the status line stays clean.
+- `--dashboard` redraws the whole terminal once a second: a progress bar with time left, download and upload rates, a speed sparkline for the last 60 s, a two-row map of the pieces (verified, mostly done, started, missing), and a table of peers sorted by download speed with their client, rates, flags, outstanding requests and share of pieces. The flags are `D` downloading from it, `d` interested but choked by it, `U` uploading to it, `u` it is interested but we choke it. The normal screen comes back when the download ends or on Ctrl-C.
 - Ctrl-C shuts down cleanly. The client tells the tracker it has stopped, closes the connections and flushes the files. A second Ctrl-C exits at once.
 - Exit code `0` means the download completed and every piece verified. Code `2` means it was interrupted, and running the same command again resumes it. Code `1` means an error, with the reason printed to standard error.
 - Resuming re-hashes whatever is already on disk and keeps the pieces that match, so it is correct even after a crash.
@@ -88,12 +90,13 @@ All channels are bounded. The session never waits on a peer: it uses `try_send`,
 | [`peer::connection`](src/peer/connection.rs) | The per-peer task: timeouts, keep-alives, batching of outgoing messages; answers metadata requests from other peers |
 | [`magnet`](src/magnet.rs) | Magnet link parsing and fetching the info dictionary from peers |
 | [`dht`](src/dht/mod.rs) | Mainline DHT node (BEP 5): [KRPC messages](src/dht/krpc.rs), [routing table](src/dht/routing.rs), iterative lookups, announce tokens, peer store |
-| [`picker`](src/picker.rs) | Rarest first, partial pieces first, pipelining, block timeouts, endgame. Pure logic. |
+| [`picker`](src/picker.rs) | Rarest first, partial pieces first, pipelining, block timeouts, endgame (at most 2 peers per block, oldest requests first). Pure logic. |
 | [`choke`](src/choke.rs) | Tit-for-tat with a rotating optimistic slot. Pure logic. |
 | [`disk`](src/disk.rs) | Multi-file layout, verified-only writes, resume, bad-block attribution |
 | [`session`](src/session.rs) | The coordinator loop |
 | [`sim`](src/sim/mod.rs) | Discrete-event swarm simulator |
 | [`cli`](src/cli.rs) | Arguments and the progress line |
+| [`dashboard`](src/dashboard.rs) | The `--dashboard` view. Rendering is plain text from a progress snapshot, so it is tested without a terminal; `crossterm` only draws it. |
 
 ### Design notes
 
@@ -305,9 +308,13 @@ The DHT (BEP 5) is done as well, so a magnet link with nothing but an info hash 
 
 `cargo test --test live_dht -- --ignored --nocapture` joins the real DHT. On 2026-11-17 it reached 24 nodes in 3.5 s and found 402 peers for the Debian image in 12.4 s.
 
-**Live trackerless test, 2026-11-17.** `download "magnet:?xt=urn:btih:7acf8fb590b2060dd9c3146ef770169d593433b0"` gives the client the info hash and nothing else: no tracker, no peers. The DHT found peers, the info dictionary arrived 11.8 s after start, and the whole 756 MiB download finished in 165.1 s with up to 46 peers. The SHA-256 matched. 821 MiB was received, about 9% more than the file. The excess is probably duplicate blocks from endgame and request timeouts with the deeper queues, but that has not been checked yet.
+**Live trackerless test, 2026-11-17.** `download "magnet:?xt=urn:btih:7acf8fb590b2060dd9c3146ef770169d593433b0"` gives the client the info hash and nothing else: no tracker, no peers. The DHT found peers, the info dictionary arrived 11.8 s after start, and the whole 756 MiB download finished in 165.1 s with up to 46 peers. The SHA-256 matched. 821 MiB was received, about 9% more than the file.
 
-Not yet built (remaining stretch goals, in order): a terminal dashboard, several torrents at once, and speed limits.
+**Where the extra data came from.** Counters added to the session (logged at the end with `-v`) split a later run's excess into blocks that arrived after their piece was already verified (25 MiB, by far the largest), blocks received twice before verification (6 MiB) and failed pieces (none). 3,483 endgame duplicate requests had been sent. The cause was endgame: once every piece was requested, each outstanding block was asked of every peer, and with queues several seconds deep most of those copies landed after another peer had delivered. Endgame now asks at most 2 peers for any block, and duplicates the oldest requests first, since those are the likeliest to be stuck. Re-running the same trackerless magnet download afterwards received 766.6 MiB for the 756 MiB file (1.4% extra) and finished in 110 s with up to 47 peers. The SHA-256 matched again.
+
+The terminal dashboard (`--dashboard`) is done too.
+
+Not yet built (remaining stretch goals, in order): several torrents at once, and speed limits.
 
 ## Reference
 

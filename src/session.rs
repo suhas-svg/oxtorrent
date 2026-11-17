@@ -109,6 +109,30 @@ pub struct Progress {
     pub upload_rate: f64,
     pub peers: usize,
     pub complete: bool,
+    /// One row per connected peer, for the dashboard.
+    pub peer_rows: Vec<PeerRow>,
+    /// State of every piece, for the dashboard's piece map.
+    pub pieces: Vec<PieceStatus>,
+}
+
+/// A connected peer as the dashboard shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeerRow {
+    pub addr: SocketAddr,
+    /// Client name and version guessed from the peer ID.
+    pub client: String,
+    pub down_rate: f64,
+    pub up_rate: f64,
+    /// The peer is choking us / we are interested in it.
+    pub peer_choking: bool,
+    pub am_interested: bool,
+    /// We are choking the peer / it is interested in us.
+    pub am_choking: bool,
+    pub peer_interested: bool,
+    /// Block requests we have outstanding to it.
+    pub requests: usize,
+    /// Pieces it has.
+    pub pieces: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -119,6 +143,29 @@ pub struct SessionStats {
     pub downloaded: u64,
     pub uploaded: u64,
     pub resumed_pieces: usize,
+    /// Where downloaded bytes beyond the file size went.
+    pub waste: Waste,
+}
+
+/// Bytes received that did not end up in the file, and the request
+/// events that cause them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Waste {
+    /// A block that had already arrived from another peer.
+    pub duplicate_bytes: u64,
+    /// A block of a piece no longer in progress (already verified), or of
+    /// the wrong size.
+    pub unexpected_bytes: u64,
+    /// Blocks of pieces that failed their hash check.
+    pub failed_bytes: u64,
+    /// Requests freed because the peer choked us.
+    pub released_on_choke: u64,
+    /// Requests freed because the peer disconnected.
+    pub released_on_drop: u64,
+    /// Requests freed because they timed out.
+    pub expired: u64,
+    /// Duplicate requests sent in endgame.
+    pub endgame_requests: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +229,8 @@ struct Peer {
     /// bytes-per-second estimate that sizes the request queue.
     dl_second: u64,
     dl_rate: f64,
+    ul_second: u64,
+    ul_rate: f64,
 }
 
 impl Peer {
@@ -203,6 +252,8 @@ impl Peer {
             ul_prev: 0,
             dl_second: 0,
             dl_rate: 0.0,
+            ul_second: 0,
+            ul_rate: 0.0,
         }
     }
 }
@@ -293,6 +344,19 @@ pub async fn run_download(
     let result = session.run(&mut events_rx, &token).await;
     let flush = session.flush().await;
     let stats = session.stats();
+    let w = &stats.waste;
+    info!(
+        "received {} bytes: {} duplicate, {} unexpected, {} in failed pieces; \
+         requests freed: {} on choke, {} on disconnect, {} timed out; {} endgame requests",
+        stats.downloaded,
+        w.duplicate_bytes,
+        w.unexpected_bytes,
+        w.failed_bytes,
+        w.released_on_choke,
+        w.released_on_drop,
+        w.expired,
+        w.endgame_requests
+    );
     let progress_tx = session.shutdown();
 
     inner.cancel();
@@ -458,6 +522,7 @@ impl Session {
                 self.uploaded += bytes;
                 if let Some(p) = self.peers.get_mut(&key) {
                     p.ul_cur += bytes;
+                    p.ul_second += bytes;
                 }
             }
             SessionEvent::PeerDisconnected { key, reason } => {
@@ -521,7 +586,7 @@ impl Session {
         };
         debug!(peer = %peer.addr, "dropping peer: {reason}");
         self.picker.remove_peer_pieces(&peer.bitfield);
-        self.picker.release_peer(key);
+        self.stats.waste.released_on_drop += self.picker.release_peer(key) as u64;
         self.peer_ids.remove(&key);
         if peer.outgoing && !self.banned.contains(&peer.addr) {
             let tries = self.attempts.get(&peer.addr).copied().unwrap_or(0);
@@ -579,7 +644,7 @@ impl Session {
                 if peer.am_interested {
                     peer.choked_since = Some(now);
                 }
-                self.picker.release_peer(key);
+                self.stats.waste.released_on_choke += self.picker.release_peer(key) as u64;
             }
             Message::Unchoke => {
                 peer.peer_choking = false;
@@ -656,7 +721,8 @@ impl Session {
                             self.verify(index).await?;
                         }
                     }
-                    BlockOutcome::Duplicate | BlockOutcome::Unexpected => {}
+                    BlockOutcome::Duplicate => self.stats.waste.duplicate_bytes += len,
+                    BlockOutcome::Unexpected => self.stats.waste.unexpected_bytes += len,
                 }
                 self.fill(key);
             }
@@ -749,6 +815,7 @@ impl Session {
         } else {
             warn!("piece {index} failed its hash check; downloading it again");
             self.stats.failed_pieces += 1;
+            self.stats.waste.failed_bytes += self.torrent.piece_size(index) as u64;
             self.picker.piece_failed(index);
         }
         self.fill_all();
@@ -891,6 +958,8 @@ impl Session {
         for p in self.peers.values_mut() {
             let second = std::mem::take(&mut p.dl_second) as f64;
             p.dl_rate = RATE_SMOOTHING * p.dl_rate + (1.0 - RATE_SMOOTHING) * second;
+            let up = std::mem::take(&mut p.ul_second) as f64;
+            p.ul_rate = RATE_SMOOTHING * p.ul_rate + (1.0 - RATE_SMOOTHING) * up;
         }
 
         // Requests that have waited too long go back to the pool.
@@ -899,6 +968,7 @@ impl Session {
             .expire(std::time::Instant::now(), self.config.timeouts.block);
         if !expired.is_empty() {
             debug!("{} block requests timed out", expired.len());
+            self.stats.waste.expired += expired.len() as u64;
         }
 
         // Peers that keep us choked while we want their pieces.
@@ -995,6 +1065,28 @@ impl Session {
             upload_rate: u as f64 / n,
             peers: self.peers.values().filter(|p| p.connected).count(),
             complete: self.complete,
+            peer_rows: self
+                .peers
+                .iter()
+                .filter(|(_, p)| p.connected)
+                .map(|(k, p)| PeerRow {
+                    addr: p.addr,
+                    client: self
+                        .peer_ids
+                        .get(k)
+                        .map(crate::peer::client_name)
+                        .unwrap_or_default(),
+                    down_rate: p.dl_rate,
+                    up_rate: p.ul_rate,
+                    peer_choking: p.peer_choking,
+                    am_interested: p.am_interested,
+                    am_choking: p.am_choking,
+                    peer_interested: p.peer_interested,
+                    requests: self.picker.outstanding(*k),
+                    pieces: p.bitfield.count_ones(),
+                })
+                .collect(),
+            pieces: self.picker.statuses().to_vec(),
         };
         self.progress_tx.send_replace(progress);
     }
@@ -1007,11 +1099,11 @@ impl Session {
     }
 
     fn stats(&self) -> SessionStats {
-        SessionStats {
-            downloaded: self.downloaded,
-            uploaded: self.uploaded,
-            ..self.stats.clone()
-        }
+        let mut s = self.stats.clone();
+        s.downloaded = self.downloaded;
+        s.uploaded = self.uploaded;
+        s.waste.endgame_requests = self.picker.endgame_requests();
+        s
     }
 
     /// Drops every peer connection and the disk sender.

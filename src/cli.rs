@@ -70,6 +70,10 @@ struct DownloadArgs {
     /// Do not use the DHT to find peers (trackers and --peer only).
     #[arg(long)]
     no_dht: bool,
+    /// Full-screen view with a speed graph, piece map and peer table
+    /// (needs a terminal; otherwise the status line is printed).
+    #[arg(long)]
+    dashboard: bool,
 }
 
 /// Runs the program and returns the process exit code.
@@ -162,6 +166,7 @@ async fn download(args: DownloadArgs) -> Result<u8> {
         pipeline,
         mut peers,
         no_dht,
+        dashboard,
     } = args;
     let use_dht = !no_dht;
     let magnet_link = if source.starts_with("magnet:") {
@@ -256,7 +261,15 @@ async fn download(args: DownloadArgs) -> Result<u8> {
     );
 
     let (progress_tx, progress_rx) = watch::channel(Progress::default());
-    let printer = tokio::spawn(print_progress(progress_rx, token.clone()));
+    let printer = if dashboard && std::io::stdout().is_terminal() {
+        tokio::spawn(crate::dashboard::run(
+            progress_rx,
+            token.clone(),
+            torrent.name.clone(),
+        ))
+    } else {
+        tokio::spawn(print_progress(progress_rx, token.clone()))
+    };
     let outcome =
         session::run_download(torrent, config, listener, progress_tx, token.clone()).await;
     token.cancel();
@@ -382,7 +395,7 @@ pub fn human_bytes(n: f64) -> String {
     }
 }
 
-fn format_duration(secs: f64) -> String {
+pub fn format_duration(secs: f64) -> String {
     let s = secs.round() as u64;
     if s >= 3600 {
         format!("{}h{:02}m", s / 3600, (s % 3600) / 60)

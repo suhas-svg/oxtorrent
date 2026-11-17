@@ -15,6 +15,9 @@ use crate::bitfield::Bitfield;
 use crate::metainfo::{block_count, block_size, piece_size};
 use crate::{PeerKey, BLOCK_SIZE};
 
+/// In endgame, the most peers one block is requested from at once.
+const ENDGAME_REQUESTERS: usize = 2;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PieceStatus {
     Missing,
@@ -178,6 +181,8 @@ pub struct Picker {
     missing: usize,
     max_in_progress: usize,
     strategy: Box<dyn PieceStrategy>,
+    /// Duplicate requests sent in endgame mode.
+    endgame_requests: u64,
 }
 
 impl Picker {
@@ -210,6 +215,7 @@ impl Picker {
             missing: n - verified,
             max_in_progress: max_in_progress.max(1),
             strategy,
+            endgame_requests: 0,
         }
     }
 
@@ -384,28 +390,43 @@ impl Picker {
             );
         }
 
-        // 3. Endgame: ask for blocks already requested from other peers.
+        // 3. Endgame: ask for blocks already requested from another peer.
+        //    Each block gets at most ENDGAME_REQUESTERS, and the oldest
+        //    requests go first: they are the likeliest to be stuck. Without
+        //    these limits every outstanding block is asked of every peer,
+        //    and with deep request queues most of those copies arrive after
+        //    the piece is already done.
         if out.len() < max && self.in_endgame() {
-            'endgame: for (&index, p) in self.partial.iter_mut() {
+            let mut candidates: Vec<(Instant, u32, usize)> = Vec::new();
+            for (&index, p) in &self.partial {
                 if !has.has(index as usize) {
                     continue;
                 }
-                let size = piece_size(self.total_length, self.piece_length, index as u64) as u32;
-                for (b, st) in p.blocks.iter_mut().enumerate() {
+                for (b, st) in p.blocks.iter().enumerate() {
                     if let BlockState::Requested(list) = st {
-                        if list.iter().any(|(k, _)| *k == peer) {
-                            continue;
-                        }
-                        list.push((peer, now));
-                        out.push(BlockRequest {
-                            index,
-                            begin: b as u32 * BLOCK_SIZE,
-                            length: block_size(size, b as u32),
-                        });
-                        if out.len() == max {
-                            break 'endgame;
+                        if list.len() < ENDGAME_REQUESTERS && !list.iter().any(|(k, _)| *k == peer)
+                        {
+                            let oldest = list.iter().map(|(_, t)| *t).min().unwrap_or(now);
+                            candidates.push((oldest, index, b));
                         }
                     }
+                }
+            }
+            candidates.sort_unstable();
+            for (_, index, b) in candidates.into_iter().take(max - out.len()) {
+                let size = piece_size(self.total_length, self.piece_length, index as u64) as u32;
+                if let Some(BlockState::Requested(list)) = self
+                    .partial
+                    .get_mut(&index)
+                    .and_then(|p| p.blocks.get_mut(b))
+                {
+                    list.push((peer, now));
+                    self.endgame_requests += 1;
+                    out.push(BlockRequest {
+                        index,
+                        begin: b as u32 * BLOCK_SIZE,
+                        length: block_size(size, b as u32),
+                    });
                 }
             }
         }
@@ -472,11 +493,15 @@ impl Picker {
     }
 
     /// Frees every block requested from `peer` (it choked us or left).
-    pub fn release_peer(&mut self, peer: PeerKey) {
+    /// Returns how many requests were dropped.
+    pub fn release_peer(&mut self, peer: PeerKey) -> usize {
+        let mut n = 0;
         for p in self.partial.values_mut() {
             for b in &mut p.blocks {
                 if let BlockState::Requested(list) = b {
+                    let before = list.len();
                     list.retain(|(k, _)| *k != peer);
+                    n += before - list.len();
                     if list.is_empty() {
                         *b = BlockState::Free;
                     }
@@ -484,6 +509,16 @@ impl Picker {
             }
         }
         self.outstanding.remove(&peer);
+        n
+    }
+
+    /// The state of every piece, by index.
+    pub fn statuses(&self) -> &[PieceStatus] {
+        &self.status
+    }
+
+    pub fn endgame_requests(&self) -> u64 {
+        self.endgame_requests
     }
 
     /// Frees requests older than `timeout`. Returns the expired requests.
@@ -657,6 +692,30 @@ mod tests {
         );
         assert_eq!(p.outstanding(1), 1);
         assert_eq!(p.outstanding(2), 1);
+    }
+
+    #[test]
+    fn endgame_limits_requesters_and_prefers_old_requests() {
+        // One piece of 4 blocks: two requested long ago, two just now.
+        let full = Bitfield::full(1);
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(10);
+        let mut p2 = Picker::new(PIECE * 2, PIECE * 2, &Bitfield::new(1), 4, Box::new(Sequential));
+        assert_eq!(p2.next_requests(1, &full, 2, t0).len(), 2);
+        assert_eq!(p2.next_requests(2, &full, 2, later).len(), 2);
+        assert!(p2.in_endgame());
+        // Peer 3 gets the two old blocks first (requested at t0 by peer 1).
+        let dup = p2.next_requests(3, &full, 2, later);
+        assert_eq!(dup.iter().map(|r| r.begin).collect::<Vec<_>>(), vec![0, BLOCK_SIZE]);
+        // Each block now has two requesters; peer 4 may take only the two
+        // that peer 2 holds alone.
+        let dup = p2.next_requests(4, &full, 4, later);
+        assert_eq!(
+            dup.iter().map(|r| r.begin).collect::<Vec<_>>(),
+            vec![2 * BLOCK_SIZE, 3 * BLOCK_SIZE]
+        );
+        assert!(p2.next_requests(5, &full, 4, later).is_empty());
+        assert_eq!(p2.endgame_requests(), 4);
     }
 
     #[test]
