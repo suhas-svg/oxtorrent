@@ -700,13 +700,22 @@ mod tests {
         let full = Bitfield::full(1);
         let t0 = Instant::now();
         let later = t0 + Duration::from_secs(10);
-        let mut p2 = Picker::new(PIECE * 2, PIECE * 2, &Bitfield::new(1), 4, Box::new(Sequential));
+        let mut p2 = Picker::new(
+            PIECE * 2,
+            PIECE * 2,
+            &Bitfield::new(1),
+            4,
+            Box::new(Sequential),
+        );
         assert_eq!(p2.next_requests(1, &full, 2, t0).len(), 2);
         assert_eq!(p2.next_requests(2, &full, 2, later).len(), 2);
         assert!(p2.in_endgame());
         // Peer 3 gets the two old blocks first (requested at t0 by peer 1).
         let dup = p2.next_requests(3, &full, 2, later);
-        assert_eq!(dup.iter().map(|r| r.begin).collect::<Vec<_>>(), vec![0, BLOCK_SIZE]);
+        assert_eq!(
+            dup.iter().map(|r| r.begin).collect::<Vec<_>>(),
+            vec![0, BLOCK_SIZE]
+        );
         // Each block now has two requesters; peer 4 may take only the two
         // that peer 2 holds alone.
         let dup = p2.next_requests(4, &full, 4, later);

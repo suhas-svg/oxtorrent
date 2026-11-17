@@ -382,7 +382,10 @@ mod tests {
         let first = lines.iter().find(|l| l.starts_with("first.iso")).unwrap();
         assert!(first.contains("50.0%"), "{first}");
         let second = lines.iter().find(|l| l.starts_with("second.iso")).unwrap();
-        assert!(second.contains("100.0%") && second.contains("done"), "{second}");
+        assert!(
+            second.contains("100.0%") && second.contains("done"),
+            "{second}"
+        );
         // Peers of both torrents, fastest first.
         let table: Vec<&String> = lines.iter().filter(|l| l.starts_with("10.0.0.1")).collect();
         assert_eq!(table.len(), 4);

@@ -296,9 +296,9 @@ async fn download(args: DownloadArgs) -> Result<u8> {
             ..Progress::default()
         });
         receivers.push(rx);
-        let inbound = router
-            .as_ref()
-            .map_or(Inbound::None, |r| Inbound::Routed(r.register(src.info_hash())));
+        let inbound = router.as_ref().map_or(Inbound::None, |r| {
+            Inbound::Routed(r.register(src.info_hash()))
+        });
         let task = tokio::spawn(run_one(src, base.clone(), inbound, tx, token.clone()));
         tasks.push((label, task));
     }

@@ -127,9 +127,15 @@ mod tests {
                 .unwrap();
             open.push(s);
         }
-        let got_b = timeout(Duration::from_secs(5), b.recv()).await.unwrap().unwrap();
+        let got_b = timeout(Duration::from_secs(5), b.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got_b.handshake.info_hash, [2; 20]);
-        let got_a = timeout(Duration::from_secs(5), a.recv()).await.unwrap().unwrap();
+        let got_a = timeout(Duration::from_secs(5), a.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got_a.handshake.info_hash, [1; 20]);
         assert_eq!(got_a.handshake.peer_id, [9; 20]);
 

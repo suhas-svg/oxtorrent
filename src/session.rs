@@ -23,8 +23,8 @@ use crate::metainfo::Torrent;
 use crate::peer::connection::{self, PeerCommand, PeerParams, PeerTarget, Timeouts};
 use crate::peer::handshake::Handshake;
 use crate::peer::message::Message;
-use crate::ratelimit::Limits;
 use crate::picker::{BlockOutcome, Picker, PieceStatus, RarestFirst};
+use crate::ratelimit::Limits;
 use crate::tracker::{self, TrackerConfig};
 use crate::PeerKey;
 

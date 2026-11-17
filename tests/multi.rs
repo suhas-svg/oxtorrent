@@ -33,7 +33,9 @@ async fn two_torrents_share_one_port() {
     ];
     let torrents: Vec<Torrent> = files
         .iter()
-        .map(|(name, data)| Torrent::from_bytes(&build_single_file(name, data, PIECE, None)).unwrap())
+        .map(|(name, data)| {
+            Torrent::from_bytes(&build_single_file(name, data, PIECE, None)).unwrap()
+        })
         .collect();
     assert_ne!(torrents[0].info_hash, torrents[1].info_hash);
 
@@ -86,7 +88,11 @@ async fn two_torrents_share_one_port() {
         assert_eq!(outcome.stats.failed_pieces, 0);
     }
     for (name, data) in &files {
-        assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), *data, "{name}");
+        assert_eq!(
+            std::fs::read(dir.path().join(name)).unwrap(),
+            *data,
+            "{name}"
+        );
     }
     token.cancel();
     seed_token.cancel();
