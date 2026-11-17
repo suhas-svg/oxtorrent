@@ -23,6 +23,7 @@ use crate::metainfo::Torrent;
 use crate::peer::connection::{self, PeerCommand, PeerParams, PeerTarget, Timeouts};
 use crate::peer::handshake::Handshake;
 use crate::peer::message::Message;
+use crate::ratelimit::Limits;
 use crate::picker::{BlockOutcome, Picker, PieceStatus, RarestFirst};
 use crate::tracker::{self, TrackerConfig};
 use crate::PeerKey;
@@ -78,6 +79,8 @@ pub struct Config {
     pub extra_peers: Vec<SocketAddr>,
     /// DHT node to search for peers on (ignored for private torrents).
     pub dht: Option<Dht>,
+    /// Speed limits, shared with the other torrents in the run.
+    pub limits: Limits,
 }
 
 impl Config {
@@ -93,6 +96,7 @@ impl Config {
             timeouts: Timeouts::default(),
             extra_peers: Vec::new(),
             dht: None,
+            limits: Limits::default(),
         }
     }
 }
@@ -655,6 +659,7 @@ impl Session {
             events: self.events_tx.clone(),
             timeouts: self.config.timeouts,
             metadata: Some(self.torrent.info_bytes.clone()),
+            limits: self.config.limits.clone(),
         };
         tokio::spawn(connection::run(target, params, rx));
         self.peers.insert(

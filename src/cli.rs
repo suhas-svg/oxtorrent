@@ -18,6 +18,7 @@ use crate::dht::{Dht, DhtConfig};
 use crate::magnet::{self, FetchConfig, Magnet, MagnetError};
 use crate::metainfo::Torrent;
 use crate::peer::generate_peer_id;
+use crate::ratelimit::Limits;
 use crate::router::Router;
 use crate::session::{self, Config, Inbound, Outcome, Progress};
 use crate::sim;
@@ -74,6 +75,13 @@ struct DownloadArgs {
     /// Do not use the DHT to find peers (trackers and --peer only).
     #[arg(long)]
     no_dht: bool,
+    /// Download speed limit for the whole run, in bytes per second
+    /// (e.g. 500K, 2M); 0 means none.
+    #[arg(long, value_name = "RATE", default_value = "0", value_parser = crate::ratelimit::parse_rate)]
+    max_down: u64,
+    /// Upload speed limit for the whole run, as for --max-down.
+    #[arg(long, value_name = "RATE", default_value = "0", value_parser = crate::ratelimit::parse_rate)]
+    max_up: u64,
     /// Full-screen view with a speed graph, piece map and peer table
     /// (needs a terminal; otherwise the status line is printed).
     #[arg(long)]
@@ -199,6 +207,8 @@ async fn download(args: DownloadArgs) -> Result<u8> {
         pipeline,
         peers,
         no_dht,
+        max_down,
+        max_up,
         dashboard,
     } = args;
     let mut sources = Vec::new();
@@ -275,6 +285,7 @@ async fn download(args: DownloadArgs) -> Result<u8> {
     base.pipeline = pipeline.max(1);
     base.extra_peers = peers;
     base.dht = dht;
+    base.limits = Limits::new(max_down, max_up);
 
     let mut receivers = Vec::new();
     let mut tasks = Vec::new();

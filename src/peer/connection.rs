@@ -1,6 +1,7 @@
 //! The per-peer task: connects, handshakes, then turns socket bytes into
 //! session events and session commands into socket bytes.
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -17,6 +18,7 @@ use super::extension::{self, MetadataMsg};
 use super::handshake::{self, Handshake, HandshakeError};
 use super::message::{Message, MessageCodec, MessageError};
 use crate::bitfield::Bitfield;
+use crate::ratelimit::Limits;
 use crate::session::SessionEvent;
 use crate::{PeerKey, BLOCK_SIZE};
 
@@ -72,7 +74,13 @@ pub struct PeerParams {
     pub timeouts: Timeouts,
     /// The info dictionary, served to peers that ask for it (BEP 9).
     pub metadata: Option<Bytes>,
+    /// Speed limits shared by every connection in the run.
+    pub limits: Limits,
 }
+
+/// Blocks held back by the upload limit for one peer (2 MiB); requests
+/// beyond this are dropped and the peer asks again.
+const MAX_HELD_UPLOADS: usize = 128;
 
 #[derive(Debug, Error)]
 pub enum PeerError {
@@ -178,10 +186,17 @@ async fn run_inner(
     let mut last_sent = Instant::now();
     let mut tick = interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Download limit: reading pauses until this time.
+    let mut read_after: Option<Instant> = None;
+    // Upload limit: blocks wait here, and the front one (already charged
+    // to the limiter) may go at `send_after`.
+    let mut uploads: VecDeque<Message> = VecDeque::new();
+    let mut send_after: Option<Instant> = None;
+    let far = || Instant::now() + Duration::from_secs(3600);
 
     loop {
         tokio::select! {
-            incoming = source.next() => {
+            incoming = source.next(), if read_after.is_none() => {
                 let msg = match incoming {
                     None => return Err(PeerError::Closed),
                     Some(r) => r?,
@@ -200,12 +215,22 @@ async fn run_inner(
                     }
                     continue;
                 }
+                if let (Message::Piece { data, .. }, Some(limit)) = (&msg, &p.limits.download) {
+                    let wait = limit.reserve(data.len());
+                    if !wait.is_zero() {
+                        read_after = Some(Instant::now() + wait);
+                    }
+                }
                 if let Some(msg) = validate(msg, p.piece_count)? {
                     p.events
                         .send(SessionEvent::FromPeer { key: p.key, msg })
                         .await
                         .map_err(|_| PeerError::SessionGone)?;
                 }
+            }
+            _ = tokio::time::sleep_until(read_after.unwrap_or_else(far)), if read_after.is_some() => {
+                read_after = None;
+                last_recv = Instant::now();
             }
             cmd = cmds.recv() => {
                 let mut batch = Vec::new();
@@ -224,22 +249,35 @@ async fn run_inner(
                 }
                 let mut sent_bytes = 0u64;
                 for m in batch {
-                    if let Message::Piece { data, .. } = &m {
-                        sent_bytes += data.len() as u64;
+                    match &m {
+                        Message::Piece { .. } if p.limits.upload.is_some() => {
+                            if uploads.len() < MAX_HELD_UPLOADS {
+                                uploads.push_back(m);
+                            } else {
+                                // The peer asked for more than we hold back;
+                                // it will ask again after its timeout.
+                                debug!(peer = %p.addr, "upload queue full; dropping a block");
+                            }
+                            continue;
+                        }
+                        Message::Piece { data, .. } => sent_bytes += data.len() as u64,
+                        _ => {}
                     }
                     sink.feed(m).await?;
                 }
+                sent_bytes += send_uploads(&mut sink, &mut uploads, &mut send_after, p).await?;
                 sink.flush().await?;
                 last_sent = Instant::now();
-                if sent_bytes > 0 {
-                    p.events
-                        .send(SessionEvent::BlockSent { key: p.key, bytes: sent_bytes })
-                        .await
-                        .map_err(|_| PeerError::SessionGone)?;
-                }
+                report_sent(p, sent_bytes).await?;
                 if close {
                     return Ok(());
                 }
+            }
+            _ = tokio::time::sleep_until(send_after.unwrap_or_else(far)), if send_after.is_some() => {
+                let sent_bytes = send_uploads(&mut sink, &mut uploads, &mut send_after, p).await?;
+                sink.flush().await?;
+                last_sent = Instant::now();
+                report_sent(p, sent_bytes).await?;
             }
             _ = tick.tick() => {
                 let now = Instant::now();
@@ -255,6 +293,58 @@ async fn run_inner(
     }
 }
 
+type PeerSink = futures::stream::SplitSink<Framed<TcpStream, MessageCodec>, Message>;
+
+/// Sends held-back blocks while the upload limit allows, and sets
+/// `send_after` for the next one. Returns the block bytes fed to `sink`
+/// (the caller flushes).
+async fn send_uploads(
+    sink: &mut PeerSink,
+    uploads: &mut VecDeque<Message>,
+    send_after: &mut Option<Instant>,
+    p: &PeerParams,
+) -> Result<u64, PeerError> {
+    let Some(limit) = &p.limits.upload else {
+        return Ok(0);
+    };
+    let mut sent = 0u64;
+    while let Some(front) = uploads.front() {
+        let now = Instant::now();
+        match *send_after {
+            // Charged already; wait for its turn.
+            Some(t) if t > now => break,
+            Some(_) => *send_after = None,
+            None => {
+                let len = match front {
+                    Message::Piece { data, .. } => data.len(),
+                    _ => 0,
+                };
+                let wait = limit.reserve(len);
+                if !wait.is_zero() {
+                    *send_after = Some(now + wait);
+                    break;
+                }
+            }
+        }
+        if let Some(m) = uploads.pop_front() {
+            if let Message::Piece { data, .. } = &m {
+                sent += data.len() as u64;
+            }
+            sink.feed(m).await?;
+        }
+    }
+    Ok(sent)
+}
+
+async fn report_sent(p: &PeerParams, bytes: u64) -> Result<(), PeerError> {
+    if bytes > 0 {
+        p.events
+            .send(SessionEvent::BlockSent { key: p.key, bytes })
+            .await
+            .map_err(|_| PeerError::SessionGone)?;
+    }
+    Ok(())
+}
 /// Handles one extension message and returns the reply to send, if any.
 /// Malformed extension messages are ignored rather than fatal: they are
 /// optional, and a peer that garbles one may still trade pieces correctly.

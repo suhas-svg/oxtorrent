@@ -42,6 +42,8 @@ With a magnet link, the client first fetches the torrent's info dictionary from 
 | `--pipeline <n>` | 5 | Minimum outstanding block requests per peer; each peer's queue grows to about 3 s of its measured rate (up to 128 blocks) |
 | `--peer <ip:port>` | none | Extra peer to dial for every torrent; may be repeated (useful on a LAN) |
 | `--no-dht` | DHT on | Find peers only through trackers and `--peer`. The DHT uses UDP on the same port number as `--port`, and is never used for private torrents (BEP 27). |
+| `--max-down <rate>` | none | Download speed limit for the whole run, all torrents together, in bytes per second: `800000`, `500K`, `2M` (K and M are 1024-based). `0` means none. |
+| `--max-up <rate>` | none | Upload speed limit, as for `--max-down` |
 | `--dashboard` | off | Full-screen view instead of the status line (see below). Ignored when standard output is not a terminal. |
 | `-v`, `-vv`, `-vvv` | off | Info, debug or trace logs on standard error |
 
@@ -102,6 +104,7 @@ All channels are bounded. The session never waits on a peer: it uses `try_send`,
 | [`session`](src/session.rs) | The coordinator loop |
 | [`sim`](src/sim/mod.rs) | Discrete-event swarm simulator |
 | [`cli`](src/cli.rs) | Arguments and the progress line |
+| [`ratelimit`](src/ratelimit.rs) | Speed limits: one token bucket per direction, shared by every connection. Downloads are slowed by pausing socket reads (TCP flow control slows the sender), uploads by holding blocks back. |
 | [`router`](src/router.rs) | The shared listener: reads each incoming handshake and passes the connection to the session for that info hash |
 | [`dashboard`](src/dashboard.rs) | The `--dashboard` view. Rendering is plain text from a progress snapshot, so it is tested without a terminal; `crossterm` only draws it. |
 
@@ -321,7 +324,7 @@ The DHT (BEP 5) is done as well, so a magnet link with nothing but an info hash 
 
 The terminal dashboard (`--dashboard`) and several torrents at once are done too. `tests/multi.rs` checks the second one: a seeder serves two torrents on one port to a leecher fetching both at once, and both files arrive intact only if every connection reaches the right session. It has not been tried on live swarms yet.
 
-Not yet built (remaining stretch goal): speed limits.
+Speed limits (`--max-down`, `--max-up`) are done as well, which completes the stretch goals. Each limit is a token bucket shared by every peer connection and torrent in the run, with a burst of a quarter second of traffic (at least 32 KiB). A connection charges each block as it arrives or before it is sent and then waits until the bucket is out of debt, so waiting connections take turns and the combined rate stays at the limit. `tests/speed_limit.rs` checks both directions on localhost: 1 MiB at a 512 KiB/s limit takes 1.8 to 2.1 s, against 1.75 s expected after the burst. Live, on the Debian swarm with `--max-down 2M`, the rate shown stayed at 2.0 MiB/s once 29 peers were connected, after a few seconds at 2.4 to 2.7 MiB/s while peers were still joining.
 
 ## Reference
 

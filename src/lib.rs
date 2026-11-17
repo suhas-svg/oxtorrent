@@ -17,6 +17,7 @@ pub mod magnet;
 pub mod metainfo;
 pub mod peer;
 pub mod picker;
+pub mod ratelimit;
 pub mod router;
 pub mod session;
 pub mod sim;
