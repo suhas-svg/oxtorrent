@@ -2,7 +2,7 @@
 """Draw the README's simulator charts as SVG, from the CSVs in results/.
 
 Usage:
-    python3 scripts/charts.py            # reads results/, writes results/*.svg
+    python3 scripts/charts.py            # reads results/, writes docs/charts/*.svg
 
 Standard library only (no matplotlib). Each chart shows the mean across the
 20 seeds with a whisker of one standard deviation, and follows the viewer's
@@ -16,7 +16,9 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
-RESULTS = Path(__file__).resolve().parent.parent / "results"
+ROOT = Path(__file__).resolve().parent.parent
+RESULTS = ROOT / "results"
+CHARTS = ROOT / "docs" / "charts"
 FILE_SIZE = 64 * 1024 * 1024
 
 W, H = 640, 330
@@ -174,6 +176,7 @@ def share_chart(path, title, subtitle, groups):
 
 
 def main():
+    CHARTS.mkdir(parents=True, exist_ok=True)
     strategies = [("Rarest first", "rarest_first"), ("Random", "random"), ("Sequential", "sequential")]
 
     groups = []
@@ -183,7 +186,7 @@ def main():
         print(f"exp1 {name:13s} mean {stats(m)[0]:7.1f} ± {stats(m)[1]:.1f}  slowest 5% {stats(s)[0]:7.1f} ± {stats(s)[1]:.1f}")
     top = max(m + sd for _, vals in groups for m, sd in vals)
     grouped_chart(
-        RESULTS / "exp1_piece_strategies.svg",
+        CHARTS / "exp1_piece_strategies.svg",
         "1. Piece strategies",
         "Download time, 1 seeder and 200 downloaders",
         groups,
@@ -199,7 +202,7 @@ def main():
         groups.append((name, v))
         print(f"exp2 {name:13s} share {v[0]:5.1f}% ± {v[1]:.1f}")
     share_chart(
-        RESULTS / "exp2_seeder_leaves.svg",
+        CHARTS / "exp2_seeder_leaves.svg",
         "2. Seeder leaves after one copy",
         "Share of the file still in the swarm; no downloader finished",
         groups,
@@ -214,7 +217,7 @@ def main():
         print(f"exp3 {name:13s} uploaders {stats(up)[0]:7.1f} ± {stats(up)[1]:.1f}  free riders {stats(free)[0]:7.1f} ± {stats(free)[1]:.1f}")
     top = max(m + sd for _, vals in groups for m, sd in vals)
     grouped_chart(
-        RESULTS / "exp3_free_riders.svg",
+        CHARTS / "exp3_free_riders.svg",
         "3. Free riders, by choke strategy",
         "Mean download time; 20% of peers upload nothing",
         groups,

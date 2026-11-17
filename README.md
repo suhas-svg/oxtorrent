@@ -272,7 +272,7 @@ Before trusting it, the simulator is checked against cases with known answers (u
 
 **1. Piece strategies.** Rarest first and random are close; sequential is far slower.
 
-![Bar chart: mean and slowest-5% download time for rarest first, random and sequential piece selection](results/exp1_piece_strategies.svg)
+![Bar chart: mean and slowest-5% download time for rarest first, random and sequential piece selection](docs/charts/exp1_piece_strategies.svg)
 
 | Strategy | Mean download | Slowest 5% |
 |---|---|---|
@@ -288,7 +288,7 @@ Before trusting it, the simulator is checked against cases with known answers (u
 | Random | 69.9% ± 1.6 |
 | Sequential | 27.3% ± 1.5 |
 
-![Bar chart: share of the file still in the swarm after the seeder leaves, by piece strategy](results/exp2_seeder_leaves.svg)
+![Bar chart: share of the file still in the swarm after the seeder leaves, by piece strategy](docs/charts/exp2_seeder_leaves.svg)
 
 The duplicates come from the rule that a peer's first four pieces are chosen at random. Super-seeding would address this.
 
@@ -300,7 +300,7 @@ The duplicates come from the rule that a peer's first four pieces are chosen at 
 | Random | 353.4 ± 6.6 s | 354.7 ± 10.5 s |
 | No reward | 509.4 ± 5.7 s | 512.0 ± 10.0 s |
 
-![Bar chart: download time of uploaders and free riders under tit-for-tat, random and no-reward choking](results/exp3_free_riders.svg)
+![Bar chart: download time of uploaders and free riders under tit-for-tat, random and no-reward choking](docs/charts/exp3_free_riders.svg)
 
 Only tit-for-tat makes free riders measurably slower, by 28%. In this model random choking is faster overall. That is worth checking against real measurements before believing it.
 

@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 330" width="640" height="330" role="img" aria-labelledby="t d">
+<title id='t'>1. Piece strategies</title><desc id='d'>1. Piece strategies. Download time, 1 seeder and 200 downloaders</desc>
+
+<style>
+  svg { --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+        --grid:#e1e0d9; --axis:#c3c2b7; --s1:#2a78d6; --s2:#eb6834; }
+  @media (prefers-color-scheme: dark) {
+    svg { --surface:#1a1a19; --ink:#f0efec; --ink2:#c3c2b7; --muted:#898781;
+          --grid:#2c2c2a; --axis:#383835; --s1:#3987e5; --s2:#d95926; }
+  }
+  text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .title { font-size:15px; font-weight:600; fill:var(--ink); }
+  .sub { font-size:12px; fill:var(--ink2); }
+  .tick { font-size:11px; fill:var(--muted); }
+  .cat { font-size:12px; fill:var(--ink2); }
+  .val { font-size:11px; fill:var(--ink2); }
+  .legend { font-size:12px; fill:var(--ink2); }
+  .note { font-size:10px; fill:var(--muted); }
+  .grid { stroke:var(--grid); stroke-width:1; }
+  .axis { stroke:var(--axis); stroke-width:1; }
+  .whisker { stroke:var(--ink2); stroke-width:1.5; }
+</style>
+
+<rect width="640" height="330" rx="8" fill="var(--surface)"/>
+<text class="title" x="64" y="26">1. Piece strategies</text>
+<text class="sub" x="64" y="45">Download time, 1 seeder and 200 downloaders</text>
+<text class="note" x="64" y="318">Simulated swarm, 20 seeds; whiskers are ±1 standard deviation. Describes the model, not the real internet.</text>
+<line class="axis" x1="64" x2="620" y1="270.0" y2="270.0"/>
+<text class="tick" x="56" y="274.0" text-anchor="end">0</text>
+<line class="grid" x1="64" x2="620" y1="231.2" y2="231.2"/>
+<text class="tick" x="56" y="235.2" text-anchor="end">200</text>
+<line class="grid" x1="64" x2="620" y1="192.4" y2="192.4"/>
+<text class="tick" x="56" y="196.4" text-anchor="end">400</text>
+<line class="grid" x1="64" x2="620" y1="153.6" y2="153.6"/>
+<text class="tick" x="56" y="157.6" text-anchor="end">600</text>
+<line class="grid" x1="64" x2="620" y1="114.8" y2="114.8"/>
+<text class="tick" x="56" y="118.8" text-anchor="end">800</text>
+<line class="grid" x1="64" x2="620" y1="76.0" y2="76.0"/>
+<text class="tick" x="56" y="80.0" text-anchor="end">1000</text>
+<text class="tick" transform="translate(16 173) rotate(-90)" text-anchor="middle">download time (s)</text>
+<rect x="518" y="35" width="12" height="12" rx="2" fill="var(--s2)"/>
+<text class="legend" x="536" y="45">Slowest 5%</text>
+<rect x="464" y="35" width="12" height="12" rx="2" fill="var(--s1)"/>
+<text class="legend" x="482" y="45">Mean</text>
+<path d="M100.1,270.0 V204.7 Q100.1,200.7 104.1,200.7 H151.7 Q155.7,200.7 155.7,204.7 V270.0 Z" fill="var(--s1)"><title>Rarest first, Mean: 357 s</title></path>
+<line class="whisker" x1="127.9" x2="127.9" y1="200.4" y2="201.0"/>
+<line class="whisker" x1="123.9" x2="131.9" y1="200.4" y2="200.4"/>
+<text class="val" x="127.9" y="194.4" text-anchor="middle">357 s</text>
+<path d="M157.7,270.0 V184.1 Q157.7,180.1 161.7,180.1 H209.3 Q213.3,180.1 213.3,184.1 V270.0 Z" fill="var(--s2)"><title>Rarest first, Slowest 5%: 463 s</title></path>
+<line class="whisker" x1="185.5" x2="185.5" y1="178.9" y2="181.3"/>
+<line class="whisker" x1="181.5" x2="189.5" y1="178.9" y2="178.9"/>
+<text class="val" x="185.5" y="172.9" text-anchor="middle">463 s</text>
+<text class="cat" x="156.7" y="290" text-anchor="middle">Rarest first</text>
+<path d="M285.4,270.0 V202.7 Q285.4,198.7 289.4,198.7 H337.0 Q341.0,198.7 341.0,202.7 V270.0 Z" fill="var(--s1)"><title>Random, Mean: 367 s</title></path>
+<line class="whisker" x1="313.2" x2="313.2" y1="198.4" y2="199.1"/>
+<line class="whisker" x1="309.2" x2="317.2" y1="198.4" y2="198.4"/>
+<text class="val" x="313.2" y="192.4" text-anchor="middle">367 s</text>
+<path d="M343.0,270.0 V183.2 Q343.0,179.2 347.0,179.2 H394.6 Q398.6,179.2 398.6,183.2 V270.0 Z" fill="var(--s2)"><title>Random, Slowest 5%: 468 s</title></path>
+<line class="whisker" x1="370.8" x2="370.8" y1="177.8" y2="180.5"/>
+<line class="whisker" x1="366.8" x2="374.8" y1="177.8" y2="177.8"/>
+<text class="val" x="370.8" y="171.8" text-anchor="middle">468 s</text>
+<text class="cat" x="342.0" y="290" text-anchor="middle">Random</text>
+<path d="M470.7,270.0 V152.3 Q470.7,148.3 474.7,148.3 H522.3 Q526.3,148.3 526.3,152.3 V270.0 Z" fill="var(--s1)"><title>Sequential, Mean: 627 s</title></path>
+<line class="whisker" x1="498.5" x2="498.5" y1="145.1" y2="151.5"/>
+<line class="whisker" x1="494.5" x2="502.5" y1="145.1" y2="145.1"/>
+<text class="val" x="498.5" y="139.1" text-anchor="middle">627 s</text>
+<path d="M528.3,270.0 V119.1 Q528.3,115.1 532.3,115.1 H579.9 Q583.9,115.1 583.9,119.1 V270.0 Z" fill="var(--s2)"><title>Sequential, Slowest 5%: 799 s</title></path>
+<line class="whisker" x1="556.1" x2="556.1" y1="111.8" y2="118.3"/>
+<line class="whisker" x1="552.1" x2="560.1" y1="111.8" y2="111.8"/>
+<text class="val" x="556.1" y="105.8" text-anchor="middle">799 s</text>
+<text class="cat" x="527.3" y="290" text-anchor="middle">Sequential</text>
+</svg>
