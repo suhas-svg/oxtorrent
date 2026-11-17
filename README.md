@@ -229,9 +229,20 @@ The output's SHA-1 matched every time. The seeder peaked at 7.4 MB.
 |---|---|
 | ≥ 80% of Transmission's speed on a live torrent | **Met: 108%** on the Debian swarm via opentrackr, average of three alternating rounds (was 61% before the rate-based request queue) |
 | Time to first piece < 10 s on a healthy swarm | About 4 s on the Debian swarm |
-| Localhost limited by disk, not by the client | About 35 MiB/s with the default pipeline of 5; not yet profiled |
+| Localhost limited by disk, not by the client | **Met:** 44 to 55 MiB/s for 1 GiB between two Oxtorrent processes, against 64 MiB/s for an uncached file copy on the same drive; the downloader averaged 0.3 to 0.4 of a core (details below) |
 | < 150 MB memory with 50 peers and 4 MB pieces | 52 to 65 MB peak live with up to 50 peers and 256 KiB pieces; piece buffers are capped at 64 MiB |
-| Shutdown < 2 s after Ctrl-C | Covered by tests (shutdown within 3 s, tracker `stopped` timeout 1.5 s) |
+| Shutdown < 2 s after Ctrl-C | **Met without a tracker:** 0.5 to 1.1 s from a real Ctrl-C to exit in three live DHT downloads (details below). With trackers, the `stopped` announce can add up to 1.5 s, which could pass 2 s; not yet measured |
+
+**Localhost run, 2026-11-17** (Windows 11, Intel i7-8750H, 12 logical cores, one SSD). A 1 GiB random file in 1,024 pieces of 1 MiB, seeded by one Oxtorrent process and downloaded by another with `--peer 127.0.0.1:<port> --no-dht`, both on the same drive:
+
+| | Time | Speed | Downloader CPU | Downloader peak memory | Seeder CPU |
+|---|---|---|---|---|---|
+| Run 1 | 18.8 s | 55 MiB/s | 6.4 s | 15 MB | 3.1 s |
+| Run 2 | 23.1 s | 44 MiB/s | 9.2 s | 15 MB | 5.1 s |
+
+Both copies matched the original's SHA-256. For comparison, copying the same file on that drive took 16.1 s (64 MiB/s) and 2.9 s once the file was in the cache, and SHA-1 over it takes 2.9 s on one core. The downloader used about a third of one core on average, so the CPU is not the limit. The download runs at 70 to 85% of an uncached copy, which reads and writes the same drive just as the two clients do. Memory figures are working sets sampled twice a second.
+
+**Shutdown, 2026-11-17.** Three trackerless downloads of the Debian image (peers from the DHT) received Ctrl-C after 25 s, while transferring. They exited, with code 2 and files ready to resume, 1.0 s, 1.1 s and 0.5 s after the signal. A torrent with trackers also sends `stopped`, which waits at most 1.5 s.
 
 Likely next optimisations: the picker scans every piece when it starts a new one (a sorted rarity structure would avoid that), and the codec test copies the input buffer once per run.
 
