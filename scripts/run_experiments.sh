@@ -26,9 +26,4 @@ for n in 2 4 8 16; do
     --slots $n --out results/exp5_slots_$n.csv
 done
 
-if python3 -c "import matplotlib" 2>/dev/null; then
-  python3 scripts/plot.py results/exp1_*.csv --out results/exp1.png --title "Piece strategies"
-  python3 scripts/plot.py results/exp3_*.csv --group free_rider --out results/exp3_free_riders.png --title "Free riders, by choke strategy"
-  python3 scripts/plot.py results/exp3_*.csv --group uploader --out results/exp3_uploaders.png --title "Uploaders, by choke strategy"
-  python3 scripts/plot.py results/exp5_*.csv --out results/exp5.png --title "Upload slots"
-fi
+python3 scripts/charts.py

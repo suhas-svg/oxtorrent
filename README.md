@@ -258,7 +258,7 @@ Scenario files in [`scenarios/`](scenarios):
 | 4 | `flash_crowd.toml` | How does a sudden crowd of 500 behave? |
 | 5 | `upload_slots.toml` | How many upload slots are best? |
 
-[`scripts/run_experiments.sh`](scripts/run_experiments.sh) runs all of them with 20 seeds each, and [`scripts/plot.py`](scripts/plot.py) (needs matplotlib) turns the CSVs into charts.
+[`scripts/run_experiments.sh`](scripts/run_experiments.sh) runs all of them with 20 seeds each, and [`scripts/charts.py`](scripts/charts.py) (standard library only) draws the charts below as SVG from the CSVs.
 
 Before trusting it, the simulator is checked against cases with known answers (unit tests in [`src/sim/mod.rs`](src/sim/mod.rs)):
 
@@ -271,6 +271,8 @@ Before trusting it, the simulator is checked against cases with known answers (u
 20 seeds per configuration, shown as mean ± standard deviation across seeds. Download times are averaged over downloaders. File: 64 MiB in 256 KiB pieces. One seeder at 1 MiB/s, downloaders at 128 KiB/s up and 1 MiB/s down, joining over the first 5 minutes. Simulated swarm: these numbers describe the model, not the real internet.
 
 **1. Piece strategies.** Rarest first and random are close; sequential is far slower.
+
+![Bar chart: mean and slowest-5% download time for rarest first, random and sequential piece selection](results/exp1_piece_strategies.svg)
 
 | Strategy | Mean download | Slowest 5% |
 |---|---|---|
@@ -286,6 +288,8 @@ Before trusting it, the simulator is checked against cases with known answers (u
 | Random | 69.9% ± 1.6 |
 | Sequential | 27.3% ± 1.5 |
 
+![Bar chart: share of the file still in the swarm after the seeder leaves, by piece strategy](results/exp2_seeder_leaves.svg)
+
 The duplicates come from the rule that a peer's first four pieces are chosen at random. Super-seeding would address this.
 
 **3. 20% free riders** (peers that upload nothing):
@@ -295,6 +299,8 @@ The duplicates come from the rule that a peer's first four pieces are chosen at 
 | Tit-for-tat | 401.5 ± 5.0 s | 515.8 ± 17.1 s |
 | Random | 353.4 ± 6.6 s | 354.7 ± 10.5 s |
 | No reward | 509.4 ± 5.7 s | 512.0 ± 10.0 s |
+
+![Bar chart: download time of uploaders and free riders under tit-for-tat, random and no-reward choking](results/exp3_free_riders.svg)
 
 Only tit-for-tat makes free riders measurably slower, by 28%. In this model random choking is faster overall. That is worth checking against real measurements before believing it.
 
