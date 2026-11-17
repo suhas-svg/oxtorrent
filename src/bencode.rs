@@ -112,6 +112,7 @@ pub fn decode_with_spans(data: &[u8]) -> Result<(Value, Spans), BencodeError> {
         data,
         pos: 0,
         spans: Vec::new(),
+        strict: true,
     };
     let v = p.value(0)?;
     if p.pos != data.len() {
@@ -120,10 +121,29 @@ pub fn decode_with_spans(data: &[u8]) -> Result<(Value, Spans), BencodeError> {
     Ok((v, p.spans))
 }
 
+/// Decodes one value at the start of `data` and returns it with the number
+/// of bytes it used; whatever follows is left to the caller.
+///
+/// For messages from peers (BEP 10 extension messages, where a metadata
+/// piece follows the dictionary). Dictionary keys may be out of order here,
+/// since some clients do not sort them; a repeated key keeps its last value.
+pub fn decode_prefix_lenient(data: &[u8]) -> Result<(Value, usize), BencodeError> {
+    let mut p = Parser {
+        data,
+        pos: 0,
+        spans: Vec::new(),
+        strict: false,
+    };
+    let v = p.value(0)?;
+    Ok((v, p.pos))
+}
+
 struct Parser<'a> {
     data: &'a [u8],
     pos: usize,
     spans: Spans,
+    /// Require sorted, unique dictionary keys.
+    strict: bool,
 }
 
 impl Parser<'_> {
@@ -223,7 +243,7 @@ impl Parser<'_> {
                 return Err(BencodeError::NonStringKey(key_pos));
             }
             let key = self.bytes()?;
-            if prev.as_ref().is_some_and(|p| *p >= key) {
+            if self.strict && prev.as_ref().is_some_and(|p| *p >= key) {
                 return Err(BencodeError::UnsortedKeys(key_pos));
             }
             let value_start = self.pos;

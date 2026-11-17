@@ -13,11 +13,31 @@ pub enum Message {
     Unchoke,
     Interested,
     NotInterested,
-    Have { index: u32 },
+    Have {
+        index: u32,
+    },
     Bitfield(Vec<u8>),
-    Request { index: u32, begin: u32, length: u32 },
-    Piece { index: u32, begin: u32, data: Bytes },
-    Cancel { index: u32, begin: u32, length: u32 },
+    Request {
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
+    Piece {
+        index: u32,
+        begin: u32,
+        data: Bytes,
+    },
+    Cancel {
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
+    /// BEP 10 extension message. `id` 0 is the extended handshake; other ids
+    /// are the ones agreed in it.
+    Extended {
+        id: u8,
+        payload: Bytes,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -78,6 +98,11 @@ impl Message {
                 dst.put_u32(*begin);
                 dst.put_u32(*length);
             }
+            Message::Extended { id, payload } => {
+                header(dst, 2 + payload.len(), 20);
+                dst.put_u8(*id);
+                dst.put_slice(payload);
+            }
         }
     }
 }
@@ -90,13 +115,21 @@ pub struct MessageCodec {
 }
 
 impl MessageCodec {
-    /// The largest accepted message is a full block or the torrent's
-    /// bitfield, whichever is bigger. Anything larger closes the connection.
+    /// The largest accepted message is a full block, a metadata piece
+    /// (BEP 9: a small dictionary plus 16 KiB) or the torrent's bitfield,
+    /// whichever is bigger. Anything larger closes the connection.
     pub fn new(piece_count: usize) -> Self {
         let block_msg = 9 + BLOCK_SIZE as usize;
+        let metadata_msg = 2 + BLOCK_SIZE as usize + 1024;
         MessageCodec {
-            max_len: block_msg.max(1 + piece_count.div_ceil(8)),
+            max_len: block_msg.max(metadata_msg).max(1 + piece_count.div_ceil(8)),
         }
+    }
+
+    /// A codec with an explicit limit, for when the piece count is not
+    /// known yet (fetching metadata for a magnet link).
+    pub fn with_max_len(max_len: usize) -> Self {
+        MessageCodec { max_len }
     }
 
     pub fn max_len(&self) -> usize {
@@ -175,8 +208,17 @@ impl Decoder for MessageCodec {
                         data: p.freeze(),
                     }
                 }
-                // Unknown or extension messages (we advertise no extensions):
-                // skip them and look at the next frame.
+                20 => {
+                    if n < 1 {
+                        return Err(MessageError::BadLength { id, len: n });
+                    }
+                    let ext = p.get_u8();
+                    Message::Extended {
+                        id: ext,
+                        payload: p.freeze(),
+                    }
+                }
+                // Unknown messages: skip them and look at the next frame.
                 _ => continue,
             };
             return Ok(Some(msg));
@@ -221,6 +263,10 @@ mod tests {
                 index: 1,
                 begin: 16384,
                 length: 16384,
+            },
+            Message::Extended {
+                id: 0,
+                payload: Bytes::from_static(b"d1:md11:ut_metadatai1eee"),
             },
         ]
     }

@@ -488,6 +488,7 @@ impl Session {
             piece_count: self.torrent.piece_count(),
             events: self.events_tx.clone(),
             timeouts: self.config.timeouts,
+            metadata: Some(self.torrent.info_bytes.clone()),
         };
         tokio::spawn(connection::run(target, params, rx));
         self.peers.insert(
@@ -641,7 +642,8 @@ impl Session {
                 }
                 self.fill(key);
             }
-            Message::Cancel { .. } => {}
+            // Extension messages are answered by the peer task itself.
+            Message::Cancel { .. } | Message::Extended { .. } => {}
         }
         Ok(())
     }

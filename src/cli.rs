@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
+use crate::magnet::{self, FetchConfig, Magnet, MagnetError};
 use crate::metainfo::Torrent;
 use crate::peer::generate_peer_id;
 use crate::session::{self, Config, Progress};
@@ -36,9 +37,10 @@ pub struct Cli {
 enum Command {
     /// Print what a .torrent file describes.
     Info { torrent: PathBuf },
-    /// Download a torrent.
+    /// Download a torrent from a .torrent file or a magnet link.
     Download {
-        torrent: PathBuf,
+        /// Path to a .torrent file, or a magnet link (quote it in the shell).
+        torrent: String,
         /// Where to save the files.
         #[arg(long, default_value = ".")]
         output: PathBuf,
@@ -154,15 +156,23 @@ fn info(path: &PathBuf) -> Result<()> {
 }
 
 async fn download(
-    path: PathBuf,
+    source: String,
     output: PathBuf,
     port: u16,
     max_peers: usize,
     seed: bool,
     pipeline: usize,
-    peers: Vec<SocketAddr>,
+    mut peers: Vec<SocketAddr>,
 ) -> Result<u8> {
-    let torrent = load(&path)?;
+    let magnet_link = if source.starts_with("magnet:") {
+        Some(Magnet::parse(&source).context("invalid magnet link")?)
+    } else {
+        None
+    };
+    let file_torrent = match magnet_link {
+        None => Some(load(&PathBuf::from(&source))?),
+        Some(_) => None,
+    };
     std::fs::create_dir_all(&output)
         .with_context(|| format!("cannot create output folder {}", output.display()))?;
 
@@ -178,7 +188,34 @@ async fn download(
         .and_then(|l| l.local_addr().ok())
         .map_or(port, |a| a.port());
 
-    let mut config = Config::new(output, generate_peer_id());
+    let token = CancellationToken::new();
+    let ctrl_c_token = token.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!("\nShutting down...");
+            ctrl_c_token.cancel();
+            if tokio::signal::ctrl_c().await.is_ok() {
+                std::process::exit(130);
+            }
+        }
+    });
+
+    let peer_id = generate_peer_id();
+    let torrent = match (file_torrent, magnet_link) {
+        (Some(t), _) => t,
+        (None, Some(m)) => {
+            match torrent_from_magnet(&m, peer_id, real_port, &mut peers, &output, &token).await? {
+                Some(t) => t,
+                None => {
+                    eprintln!("error: interrupted before the metadata arrived");
+                    return Ok(2);
+                }
+            }
+        }
+        (None, None) => unreachable!("either a file or a magnet link"),
+    };
+
+    let mut config = Config::new(output, peer_id);
     config.port = real_port;
     config.max_peers = max_peers.max(1);
     config.seed = seed;
@@ -191,18 +228,6 @@ async fn download(
         human_bytes(torrent.total_length as f64),
         torrent.piece_count()
     );
-
-    let token = CancellationToken::new();
-    let ctrl_c_token = token.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            eprintln!("\nShutting down...");
-            ctrl_c_token.cancel();
-            if tokio::signal::ctrl_c().await.is_ok() {
-                std::process::exit(130);
-            }
-        }
-    });
 
     let (progress_tx, progress_rx) = watch::channel(Progress::default());
     let printer = tokio::spawn(print_progress(progress_rx, token.clone()));
@@ -225,6 +250,44 @@ async fn download(
         );
         Ok(2)
     }
+}
+
+/// Fetches the info dictionary for a magnet link and saves it as a
+/// `.torrent` file in the output folder, so a later run can resume from the
+/// file. Returns `None` if cancelled. Peers seen while fetching are added to
+/// `peers`.
+async fn torrent_from_magnet(
+    m: &Magnet,
+    peer_id: [u8; 20],
+    port: u16,
+    peers: &mut Vec<SocketAddr>,
+    output: &std::path::Path,
+    token: &CancellationToken,
+) -> Result<Option<Torrent>> {
+    let label = m
+        .name
+        .clone()
+        .unwrap_or_else(|| crate::metainfo::hex(&m.info_hash));
+    eprintln!("Fetching metadata for {label} from peers...");
+    let fetched =
+        match magnet::fetch_metadata(m, &FetchConfig::new(peer_id, port), peers, token).await {
+            Ok(f) => f,
+            Err(MagnetError::Cancelled) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+    let torrent = Torrent::from_info(&fetched.info, &m.trackers)
+        .context("peers sent metadata that is not a valid info dictionary")?;
+    for p in fetched.peers {
+        if !peers.contains(&p) {
+            peers.push(p);
+        }
+    }
+    let file = output.join(format!("{}.torrent", torrent.name));
+    match std::fs::write(&file, torrent.to_file_bytes()) {
+        Ok(()) => eprintln!("Saved the torrent file to {}", file.display()),
+        Err(e) => warn!("cannot save {}: {e}", file.display()),
+    }
+    Ok(Some(torrent))
 }
 
 async fn print_progress(mut rx: watch::Receiver<Progress>, token: CancellationToken) {

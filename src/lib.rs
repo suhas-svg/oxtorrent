@@ -11,6 +11,7 @@ pub mod bitfield;
 pub mod choke;
 pub mod cli;
 pub mod disk;
+pub mod magnet;
 pub mod metainfo;
 pub mod peer;
 pub mod picker;

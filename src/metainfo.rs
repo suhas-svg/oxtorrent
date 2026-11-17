@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use bytes::Bytes;
 use sha1::{Digest, Sha1};
 use thiserror::Error;
 
@@ -50,6 +51,9 @@ pub struct Torrent {
     pub total_length: u64,
     pub info_hash: [u8; 20],
     pub multi_file: bool,
+    /// The exact bytes of the `info` dictionary, served to peers that fetch
+    /// metadata from us (BEP 9).
+    pub info_bytes: Bytes,
 }
 
 impl Torrent {
@@ -60,7 +64,8 @@ impl Torrent {
             .find(|(k, _)| k == b"info")
             .map(|(_, r)| r.clone())
             .ok_or(MetainfoError::Missing("info"))?;
-        let info_hash: [u8; 20] = Sha1::digest(&data[info_span]).into();
+        let info_bytes = Bytes::copy_from_slice(&data[info_span]);
+        let info_hash: [u8; 20] = Sha1::digest(&info_bytes).into();
         let info = root.get("info").ok_or(MetainfoError::Missing("info"))?;
         if info.as_dict().is_none() {
             return Err(MetainfoError::Invalid("info"));
@@ -143,7 +148,25 @@ impl Torrent {
             total_length,
             info_hash,
             multi_file,
+            info_bytes,
         })
+    }
+
+    /// Builds a torrent from a bare `info` dictionary, as fetched from peers
+    /// for a magnet link, plus the tracker URLs to use.
+    pub fn from_info(info: &[u8], trackers: &[String]) -> Result<Torrent, MetainfoError> {
+        let tiers: Vec<Vec<String>> = trackers.iter().map(|t| vec![t.clone()]).collect();
+        Torrent::from_bytes(&torrent_file(info, &tiers))
+    }
+
+    /// A `.torrent` file for this torrent: its trackers (as an announce
+    /// list) and the original info dictionary bytes.
+    pub fn to_file_bytes(&self) -> Vec<u8> {
+        let mut tiers = self.announce_list.clone();
+        if tiers.is_empty() {
+            tiers.extend(self.announce.iter().map(|a| vec![a.clone()]));
+        }
+        torrent_file(&self.info_bytes, &tiers)
     }
 
     pub fn piece_count(&self) -> usize {
@@ -178,6 +201,26 @@ impl Torrent {
     pub fn info_hash_hex(&self) -> String {
         hex(&self.info_hash)
     }
+}
+
+/// Writes `{announce-list, info}` with the info dictionary copied verbatim,
+/// so the info hash is unchanged. Keys are in sorted order.
+fn torrent_file(info: &[u8], tiers: &[Vec<String>]) -> Vec<u8> {
+    let mut root = b"d".to_vec();
+    if !tiers.is_empty() {
+        let list = Value::List(
+            tiers
+                .iter()
+                .map(|tier| Value::List(tier.iter().map(|u| Value::str(u)).collect()))
+                .collect(),
+        );
+        root.extend_from_slice(b"13:announce-list");
+        bencode::encode_into(&list, &mut root);
+    }
+    root.extend_from_slice(b"4:info");
+    root.extend_from_slice(info);
+    root.push(b'e');
+    root
 }
 
 fn non_negative(v: &Value, field: &'static str) -> Result<u64, MetainfoError> {
@@ -425,6 +468,29 @@ mod tests {
             PathBuf::from("dir").join("sub").join("b.txt")
         );
         assert_eq!(t.piece_count(), 2);
+    }
+
+    #[test]
+    fn from_info_keeps_the_info_hash() {
+        let original = Torrent::from_bytes(&known_torrent()).unwrap();
+        let rebuilt = Torrent::from_info(
+            &original.info_bytes,
+            &[
+                "udp://a.example:1/".to_string(),
+                "http://b.example/".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(rebuilt.info_hash, original.info_hash);
+        assert_eq!(rebuilt.info_bytes, original.info_bytes);
+        assert_eq!(
+            rebuilt.trackers(),
+            vec!["udp://a.example:1/", "http://b.example/"]
+        );
+        assert!(Torrent::from_info(b"d4:name1:xe", &[]).is_err());
+        let saved = Torrent::from_bytes(&rebuilt.to_file_bytes()).unwrap();
+        assert_eq!(saved.info_hash, original.info_hash);
+        assert_eq!(saved.trackers(), rebuilt.trackers());
     }
 
     #[test]

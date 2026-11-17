@@ -1,6 +1,8 @@
-//! The peer wire protocol: handshake, message codec, and the per-peer task.
+//! The peer wire protocol: handshake, message codec, extensions, and the
+//! per-peer task.
 
 pub mod connection;
+pub mod extension;
 pub mod handshake;
 pub mod message;
 

@@ -21,7 +21,12 @@ target/release/oxtorrent download debian.iso.torrent --output ~/Downloads
 
 # Keep seeding afterwards, until Ctrl-C
 target/release/oxtorrent download debian.iso.torrent --output ~/Downloads --seed
+
+# Or start from a magnet link (quote it: it contains &)
+target/release/oxtorrent download "magnet:?xt=urn:btih:7acf8fb590b2060dd9c3146ef770169d593433b0&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce" --output ~/Downloads
 ```
+
+With a magnet link, the client first fetches the torrent's info dictionary from peers (BEP 9), checks its SHA-1 against the link's info hash and saves it as `<name>.torrent` in the output folder. Running `download` on that file later resumes without fetching the metadata again. The link's `xt` (hex or base32 info hash), `tr` (trackers), `dn` (name) and `x.pe` (peers) fields are read.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -78,7 +83,9 @@ All channels are bounded. The session never waits on a peer: it uses `try_send`,
 | [`tracker`](src/tracker.rs) | HTTP announces (URL building, reply parsing in compact, dictionary and IPv6 forms), [UDP announces](src/tracker/udp.rs) (BEP 15: connect / announce, cached connection IDs, retransmission at 3, 6 and 12 s), and the tracker task |
 | [`peer::handshake`](src/peer/handshake.rs) | The 68-byte opening exchange |
 | [`peer::message`](src/peer/message.rs) | `Message` enum and the `tokio_util` codec, with a hard size cap |
-| [`peer::connection`](src/peer/connection.rs) | The per-peer task: timeouts, keep-alives, batching of outgoing messages |
+| [`peer::extension`](src/peer/extension.rs) | Extension protocol (BEP 10): reserved bit, extended handshake, `ut_metadata` messages (BEP 9) |
+| [`peer::connection`](src/peer/connection.rs) | The per-peer task: timeouts, keep-alives, batching of outgoing messages; answers metadata requests from other peers |
+| [`magnet`](src/magnet.rs) | Magnet link parsing and fetching the info dictionary from peers |
 | [`picker`](src/picker.rs) | Rarest first, partial pieces first, pipelining, block timeouts, endgame. Pure logic. |
 | [`choke`](src/choke.rs) | Tit-for-tat with a rotating optimistic slot. Pure logic. |
 | [`disk`](src/disk.rs) | Multi-file layout, verified-only writes, resume, bad-block attribution |
@@ -275,14 +282,18 @@ These point the same way as the 2006 measurement study: rarest first keeps piece
 
 ## Scope
 
-Version 1 includes: single-file and multi-file torrents, HTTP(S) and UDP trackers with announce-list, download and upload over TCP, SHA-1 verification, rarest first, endgame, tit-for-tat choking, resume, and the progress line.
+Version 1 includes: single-file and multi-file torrents, HTTP(S) and UDP trackers with announce-list, magnet links (fetching and serving metadata), download and upload over TCP, SHA-1 verification, rarest first, endgame, tit-for-tat choking, resume, and the progress line.
 
 UDP trackers (BEP 15), the first stretch goal, are done. `cargo test --test live_udp -- --ignored --nocapture` announces to a public UDP tracker; on 2026-11-16 `tracker.opentrackr.org:1337` returned 200 peers for the Debian image in 0.6 s.
 
-Not yet built (remaining stretch goals, in order): the extension protocol (BEP 10), magnet links (BEP 9), DHT (BEP 5), a terminal dashboard, several torrents at once, and speed limits.
+The extension protocol (BEP 10) and magnet links (BEP 9) are done too. A magnet download asks up to 8 peers at once for the whole info dictionary and keeps the first copy whose SHA-1 matches; peers that send a wrong hash, reject requests, lack the extension or claim an implausible size are skipped. Every download connection also serves the info dictionary to peers that ask for it.
+
+**Live magnet test, 2026-11-17.** `download` on a magnet link carrying only the Debian 13.7.0 netinst info hash and `udp://tracker.opentrackr.org:1337/announce` (no `.torrent` file; Debian's own tracker was unreachable that day). The UDP tracker returned 200 peers in 2 s, the 60,578-byte info dictionary arrived from a peer 16.7 s after start, and the whole run, metadata included, took 94.2 s with exit code 0. That is about 9.8 MiB/s over the 77 s download, with up to 49 peers connected. The ISO's SHA-256 matched Debian's `SHA256SUMS`. This used a different tracker and swarm from the Transmission comparison above, so it is not a like-for-like speed result.
+
+Not yet built (remaining stretch goals, in order): DHT (BEP 5), a terminal dashboard, several torrents at once, and speed limits.
 
 ## Reference
 
 - [BEP 3: The BitTorrent Protocol Specification](https://www.bittorrent.org/beps/bep_0003.html)
-- [BEP 12: Multitracker Metadata Extension](https://www.bittorrent.org/beps/bep_0012.html), [BEP 15: UDP Tracker Protocol](https://www.bittorrent.org/beps/bep_0015.html), [BEP 20: Peer ID Conventions](https://www.bittorrent.org/beps/bep_0020.html), [BEP 23: Compact peer lists](https://www.bittorrent.org/beps/bep_0023.html)
+- [BEP 12: Multitracker Metadata Extension](https://www.bittorrent.org/beps/bep_0012.html), [BEP 15: UDP Tracker Protocol](https://www.bittorrent.org/beps/bep_0015.html), [BEP 9: Extension for Peers to Send Metadata Files](https://www.bittorrent.org/beps/bep_0009.html), [BEP 10: Extension Protocol](https://www.bittorrent.org/beps/bep_0010.html), [BEP 20: Peer ID Conventions](https://www.bittorrent.org/beps/bep_0020.html), [BEP 23: Compact peer lists](https://www.bittorrent.org/beps/bep_0023.html)
 - Legout, Urvoy-Keller, Michiardi: *Rarest First and Choke Algorithms Are Enough* (IMC 2006)

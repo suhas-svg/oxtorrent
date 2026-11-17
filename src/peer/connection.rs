@@ -4,6 +4,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -12,6 +13,7 @@ use tokio::time::{interval, timeout, Instant, MissedTickBehavior};
 use tokio_util::codec::Framed;
 use tracing::{debug, trace};
 
+use super::extension::{self, MetadataMsg};
 use super::handshake::{self, Handshake, HandshakeError};
 use super::message::{Message, MessageCodec, MessageError};
 use crate::bitfield::Bitfield;
@@ -65,6 +67,8 @@ pub struct PeerParams {
     pub piece_count: usize,
     pub events: mpsc::Sender<SessionEvent>,
     pub timeouts: Timeouts,
+    /// The info dictionary, served to peers that ask for it (BEP 9).
+    pub metadata: Option<Bytes>,
 }
 
 #[derive(Debug, Error)]
@@ -87,6 +91,8 @@ pub enum PeerError {
     RequestTooLarge(u32),
     #[error("peer referred to piece {0}, which does not exist")]
     BadIndex(u32),
+    #[error("peer sent an extension message without enabling extensions")]
+    UnexpectedExtension,
     #[error("connection closed by peer")]
     Closed,
     #[error("session is gone")]
@@ -125,13 +131,29 @@ async fn run_inner(
     };
     let _ = stream.set_nodelay(true);
 
-    let ours = Handshake::new(p.info_hash, p.our_id);
+    let mut ours = Handshake::new(p.info_hash, p.our_id);
+    extension::set_extension_bit(&mut ours.reserved);
     let theirs = timeout(
         p.timeouts.handshake,
         handshake::exchange(&mut stream, &ours, initiator),
     )
     .await
     .map_err(|_| PeerError::HandshakeTimeout)??;
+
+    let framed = Framed::new(stream, MessageCodec::new(p.piece_count));
+    let (mut sink, mut source) = framed.split();
+    let extensions = extension::supports_extensions(&theirs.reserved);
+    // The peer's id for ut_metadata messages, once its extended handshake
+    // arrives.
+    let mut their_ut_metadata: Option<u8> = None;
+    if extensions {
+        let hs = extension::encode_handshake(p.metadata.as_ref().map(Bytes::len));
+        sink.send(Message::Extended {
+            id: extension::HANDSHAKE_ID,
+            payload: hs,
+        })
+        .await?;
+    }
 
     p.events
         .send(SessionEvent::PeerConnected {
@@ -140,9 +162,6 @@ async fn run_inner(
         })
         .await
         .map_err(|_| PeerError::SessionGone)?;
-
-    let framed = Framed::new(stream, MessageCodec::new(p.piece_count));
-    let (mut sink, mut source) = framed.split();
     let mut last_recv = Instant::now();
     let mut last_sent = Instant::now();
     let mut tick = interval(Duration::from_secs(1));
@@ -157,6 +176,18 @@ async fn run_inner(
                 };
                 last_recv = Instant::now();
                 trace!(peer = %p.addr, "recv {:?}", short(&msg));
+                if let Message::Extended { id, payload } = msg {
+                    // Extension messages are handled here; the session never
+                    // sees them.
+                    if !extensions {
+                        return Err(PeerError::UnexpectedExtension);
+                    }
+                    if let Some(reply) = on_extended(id, &payload, &mut their_ut_metadata, p) {
+                        sink.send(reply).await?;
+                        last_sent = Instant::now();
+                    }
+                    continue;
+                }
                 if let Some(msg) = validate(msg, p.piece_count)? {
                     p.events
                         .send(SessionEvent::FromPeer { key: p.key, msg })
@@ -210,6 +241,49 @@ async fn run_inner(
             }
         }
     }
+}
+
+/// Handles one extension message and returns the reply to send, if any.
+/// Malformed extension messages are ignored rather than fatal: they are
+/// optional, and a peer that garbles one may still trade pieces correctly.
+fn on_extended(
+    id: u8,
+    payload: &Bytes,
+    their_ut_metadata: &mut Option<u8>,
+    p: &PeerParams,
+) -> Option<Message> {
+    if id == extension::HANDSHAKE_ID {
+        match extension::parse_handshake(payload) {
+            Ok(h) => {
+                debug!(peer = %p.addr, client = ?h.client, "extended handshake");
+                *their_ut_metadata = h.ut_metadata;
+            }
+            Err(e) => debug!(peer = %p.addr, "bad extended handshake: {e}"),
+        }
+        return None;
+    }
+    if id != extension::UT_METADATA_ID {
+        return None;
+    }
+    let reply_id = (*their_ut_metadata)?;
+    let MetadataMsg::Request { piece } = MetadataMsg::parse(payload).ok()? else {
+        return None;
+    };
+    let reply = match p.metadata.as_ref() {
+        Some(info) => match extension::metadata_piece(info, piece) {
+            Some(data) => MetadataMsg::Data {
+                piece,
+                total_size: Some(info.len()),
+                data,
+            },
+            None => MetadataMsg::Reject { piece },
+        },
+        None => MetadataMsg::Reject { piece },
+    };
+    Some(Message::Extended {
+        id: reply_id,
+        payload: reply.encode(),
+    })
 }
 
 /// Checks what the peer task can check without the session's state.
