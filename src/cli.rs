@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
+use crate::dht::{Dht, DhtConfig};
 use crate::magnet::{self, FetchConfig, Magnet, MagnetError};
 use crate::metainfo::Torrent;
 use crate::peer::generate_peer_id;
@@ -38,31 +39,37 @@ enum Command {
     /// Print what a .torrent file describes.
     Info { torrent: PathBuf },
     /// Download a torrent from a .torrent file or a magnet link.
-    Download {
-        /// Path to a .torrent file, or a magnet link (quote it in the shell).
-        torrent: String,
-        /// Where to save the files.
-        #[arg(long, default_value = ".")]
-        output: PathBuf,
-        /// TCP port for incoming peers.
-        #[arg(long, default_value_t = 6881)]
-        port: u16,
-        /// Maximum simultaneous connections.
-        #[arg(long, default_value_t = 50)]
-        max_peers: usize,
-        /// Keep uploading after the download completes (until Ctrl-C).
-        #[arg(long)]
-        seed: bool,
-        /// Minimum outstanding block requests per peer; the queue grows
-        /// with each peer's measured speed.
-        #[arg(long, default_value_t = 5)]
-        pipeline: usize,
-        /// Extra peer to connect to (ip:port); may be repeated.
-        #[arg(long = "peer")]
-        peers: Vec<SocketAddr>,
-    },
+    Download(DownloadArgs),
     /// Run the swarm simulator on a scenario file.
     Simulate(sim::SimulateArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct DownloadArgs {
+    /// Path to a .torrent file, or a magnet link (quote it in the shell).
+    torrent: String,
+    /// Where to save the files.
+    #[arg(long, default_value = ".")]
+    output: PathBuf,
+    /// TCP port for incoming peers.
+    #[arg(long, default_value_t = 6881)]
+    port: u16,
+    /// Maximum simultaneous connections.
+    #[arg(long, default_value_t = 50)]
+    max_peers: usize,
+    /// Keep uploading after the download completes (until Ctrl-C).
+    #[arg(long)]
+    seed: bool,
+    /// Minimum outstanding block requests per peer; the queue grows
+    /// with each peer's measured speed.
+    #[arg(long, default_value_t = 5)]
+    pipeline: usize,
+    /// Extra peer to connect to (ip:port); may be repeated.
+    #[arg(long = "peer")]
+    peers: Vec<SocketAddr>,
+    /// Do not use the DHT to find peers (trackers and --peer only).
+    #[arg(long)]
+    no_dht: bool,
 }
 
 /// Runs the program and returns the process exit code.
@@ -74,19 +81,9 @@ pub fn run() -> Result<u8> {
             info(&torrent)?;
             Ok(0)
         }
-        Command::Download {
-            torrent,
-            output,
-            port,
-            max_peers,
-            seed,
-            pipeline,
-            peers,
-        } => {
+        Command::Download(args) => {
             let rt = tokio::runtime::Runtime::new().context("cannot start the async runtime")?;
-            rt.block_on(download(
-                torrent, output, port, max_peers, seed, pipeline, peers,
-            ))
+            rt.block_on(download(args))
         }
         Command::Simulate(args) => {
             sim::run_cli(&args)?;
@@ -155,15 +152,18 @@ fn info(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn download(
-    source: String,
-    output: PathBuf,
-    port: u16,
-    max_peers: usize,
-    seed: bool,
-    pipeline: usize,
-    mut peers: Vec<SocketAddr>,
-) -> Result<u8> {
+async fn download(args: DownloadArgs) -> Result<u8> {
+    let DownloadArgs {
+        torrent: source,
+        output,
+        port,
+        max_peers,
+        seed,
+        pipeline,
+        mut peers,
+        no_dht,
+    } = args;
+    let use_dht = !no_dht;
     let magnet_link = if source.starts_with("magnet:") {
         Some(Magnet::parse(&source).context("invalid magnet link")?)
     } else {
@@ -200,11 +200,36 @@ async fn download(
         }
     });
 
+    // The DHT listens on the same port number as the TCP listener, over UDP.
+    // It joins the network in the background while the download starts.
+    let private = file_torrent.as_ref().is_some_and(|t| t.private);
+    let dht = if use_dht && !private {
+        match Dht::start(
+            DhtConfig {
+                port: real_port,
+                ..DhtConfig::default()
+            },
+            token.clone(),
+        )
+        .await
+        {
+            Ok(d) => Some(d),
+            Err(e) => {
+                warn!("cannot start the DHT ({e}); using trackers only");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let peer_id = generate_peer_id();
     let torrent = match (file_torrent, magnet_link) {
         (Some(t), _) => t,
         (None, Some(m)) => {
-            match torrent_from_magnet(&m, peer_id, real_port, &mut peers, &output, &token).await? {
+            let mut fetch = FetchConfig::new(peer_id, real_port);
+            fetch.dht = dht.clone();
+            match torrent_from_magnet(&m, &fetch, &mut peers, &output, &token).await? {
                 Some(t) => t,
                 None => {
                     eprintln!("error: interrupted before the metadata arrived");
@@ -221,6 +246,7 @@ async fn download(
     config.seed = seed;
     config.pipeline = pipeline.max(1);
     config.extra_peers = peers;
+    config.dht = dht;
 
     eprintln!(
         "Downloading {} ({}, {} pieces)",
@@ -258,8 +284,7 @@ async fn download(
 /// `peers`.
 async fn torrent_from_magnet(
     m: &Magnet,
-    peer_id: [u8; 20],
-    port: u16,
+    fetch: &FetchConfig,
     peers: &mut Vec<SocketAddr>,
     output: &std::path::Path,
     token: &CancellationToken,
@@ -269,12 +294,11 @@ async fn torrent_from_magnet(
         .clone()
         .unwrap_or_else(|| crate::metainfo::hex(&m.info_hash));
     eprintln!("Fetching metadata for {label} from peers...");
-    let fetched =
-        match magnet::fetch_metadata(m, &FetchConfig::new(peer_id, port), peers, token).await {
-            Ok(f) => f,
-            Err(MagnetError::Cancelled) => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
+    let fetched = match magnet::fetch_metadata(m, fetch, peers, token).await {
+        Ok(f) => f,
+        Err(MagnetError::Cancelled) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
     let torrent = Torrent::from_info(&fetched.info, &m.trackers)
         .context("peers sent metadata that is not a valid info dictionary")?;
     for p in fetched.peers {

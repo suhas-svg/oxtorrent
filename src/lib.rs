@@ -10,6 +10,7 @@ pub mod bencode;
 pub mod bitfield;
 pub mod choke;
 pub mod cli;
+pub mod dht;
 pub mod disk;
 pub mod magnet;
 pub mod metainfo;

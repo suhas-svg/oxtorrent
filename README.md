@@ -36,6 +36,7 @@ With a magnet link, the client first fetches the torrent's info dictionary from 
 | `--seed` | off | Keep uploading after the download completes |
 | `--pipeline <n>` | 5 | Minimum outstanding block requests per peer; each peer's queue grows to about 3 s of its measured rate (up to 128 blocks) |
 | `--peer <ip:port>` | none | Extra peer to dial; may be repeated (useful on a LAN) |
+| `--no-dht` | DHT on | Find peers only through trackers and `--peer`. The DHT uses UDP on the same port number as `--port`, and is never used for private torrents (BEP 27). |
 | `-v`, `-vv`, `-vvv` | off | Info, debug or trace logs on standard error |
 
 - `download` prints one status line per second on standard output: percent done, download and upload speed, connected peers and time left. Logs go to standard error, so the status line stays clean.
@@ -86,6 +87,7 @@ All channels are bounded. The session never waits on a peer: it uses `try_send`,
 | [`peer::extension`](src/peer/extension.rs) | Extension protocol (BEP 10): reserved bit, extended handshake, `ut_metadata` messages (BEP 9) |
 | [`peer::connection`](src/peer/connection.rs) | The per-peer task: timeouts, keep-alives, batching of outgoing messages; answers metadata requests from other peers |
 | [`magnet`](src/magnet.rs) | Magnet link parsing and fetching the info dictionary from peers |
+| [`dht`](src/dht/mod.rs) | Mainline DHT node (BEP 5): [KRPC messages](src/dht/krpc.rs), [routing table](src/dht/routing.rs), iterative lookups, announce tokens, peer store |
 | [`picker`](src/picker.rs) | Rarest first, partial pieces first, pipelining, block timeouts, endgame. Pure logic. |
 | [`choke`](src/choke.rs) | Tit-for-tat with a rotating optimistic slot. Pure logic. |
 | [`disk`](src/disk.rs) | Multi-file layout, verified-only writes, resume, bad-block attribution |
@@ -157,7 +159,16 @@ Fake peer behaviours ([`tests/bad_peers.rs`](tests/bad_peers.rs), [`tests/downlo
 
 That puts Oxtorrent at **61%** of Transmission's speed, short of the 80% target. Likely causes, in the order to check them: a fixed pipeline of 5 requests per peer (Transmission sizes its queue from each peer's rate), fewer connected peers (14 to 18 of the 50 returned), and unproductive peers that are dropped only after 90 s.
 
-Since then the first cause has been addressed: each peer's request queue now follows its smoothed download rate (about 3 s of data, 5 to 128 blocks), and the in-progress cap is set by memory rather than a fixed 16 pieces, which with 256 KiB pieces had allowed only 256 blocks in flight across the whole swarm. A re-run of the comparison on 2026-11-16 was abandoned because Debian's tracker stopped accepting connections partway through, so the 61% figure above has not been re-measured yet.
+Since then the first cause has been addressed: each peer's request queue now follows its smoothed download rate (about 3 s of data, 5 to 128 blocks), and the in-progress cap is set by memory rather than a fixed 16 pieces, which with 256 KiB pieces had allowed only 256 blocks in flight across the whole swarm. A re-run on 2026-11-16 was abandoned because Debian's tracker stopped accepting connections partway through.
+
+**Re-run after the queue fix, 2026-11-17.** Debian's tracker was still down, so both clients got the same image through `udp://tracker.opentrackr.org:1337/announce`. The `.torrent` was rebuilt with that as its only tracker: same info hash, no web seeds. Otherwise the setup was the same as above: alternating runs, three rounds, Transmission's DHT, PEX, LPD and uTP off, and no DHT in the Oxtorrent build. All six outputs matched Debian's SHA-256.
+
+| | Run 1 | Run 2 | Run 3 | Average | Peak memory |
+|---|---|---|---|---|---|
+| Transmission | 110.1 s | 111.1 s | 196.3 s | 139.2 s (5.43 MiB/s) | ~30 MB |
+| Oxtorrent | 103.7 s | 121.3 s | 160.0 s | 128.3 s (5.89 MiB/s) | ~60 MB |
+
+Oxtorrent now averages **108%** of Transmission's speed, ahead in rounds 1 and 3 and at 92% in round 2. The swarm's speed changed between rounds (round 3 was slow for both), which is why runs alternate. Oxtorrent uses about twice the memory, because it now allows up to 64 MiB of pieces in progress. That is still well under the 150 MB target.
 
 Steps:
 
@@ -170,7 +181,7 @@ Steps:
 
 ## Benchmarks
 
-Measured on the development machine (Windows 11, release build). These are first measurements, to be revised. The live-swarm comparison with Transmission is still to do.
+Measured on the development machine (Windows 11, release build). The localhost and micro-benchmark numbers are first measurements, taken before the rate-based request queue.
 
 **Localhost, client to client.** One `oxtorrent download --seed` process serves a 64 MiB file with 256 KiB pieces to a second process over `127.0.0.1` (`--peer`). Three runs, each including start-up and file creation:
 
@@ -195,10 +206,10 @@ The output's SHA-1 matched every time. The seeder peaked at 7.4 MB.
 
 | Target (spec) | Status |
 |---|---|
-| ≥ 80% of Transmission's speed on a live torrent | **Not met yet: 61%** (see below) |
+| ≥ 80% of Transmission's speed on a live torrent | **Met: 108%** on the Debian swarm via opentrackr, average of three alternating rounds (was 61% before the rate-based request queue) |
 | Time to first piece < 10 s on a healthy swarm | About 4 s on the Debian swarm |
 | Localhost limited by disk, not by the client | About 35 MiB/s with the default pipeline of 5; not yet profiled |
-| < 150 MB memory with 50 peers and 4 MB pieces | 15.7 MB live with 18 peers and 256 KiB pieces; buffers are capped at 64 MiB |
+| < 150 MB memory with 50 peers and 4 MB pieces | 52 to 65 MB peak live with up to 50 peers and 256 KiB pieces; piece buffers are capped at 64 MiB |
 | Shutdown < 2 s after Ctrl-C | Covered by tests (shutdown within 3 s, tracker `stopped` timeout 1.5 s) |
 
 Likely next optimisations: the picker scans every piece when it starts a new one (a sorted rarity structure would avoid that), and the codec test copies the input buffer once per run.
@@ -282,7 +293,7 @@ These point the same way as the 2006 measurement study: rarest first keeps piece
 
 ## Scope
 
-Version 1 includes: single-file and multi-file torrents, HTTP(S) and UDP trackers with announce-list, magnet links (fetching and serving metadata), download and upload over TCP, SHA-1 verification, rarest first, endgame, tit-for-tat choking, resume, and the progress line.
+Version 1 includes: single-file and multi-file torrents, HTTP(S) and UDP trackers with announce-list, magnet links (fetching and serving metadata), the DHT, download and upload over TCP, SHA-1 verification, rarest first, endgame, tit-for-tat choking, resume, and the progress line.
 
 UDP trackers (BEP 15), the first stretch goal, are done. `cargo test --test live_udp -- --ignored --nocapture` announces to a public UDP tracker; on 2026-11-16 `tracker.opentrackr.org:1337` returned 200 peers for the Debian image in 0.6 s.
 
@@ -290,10 +301,16 @@ The extension protocol (BEP 10) and magnet links (BEP 9) are done too. A magnet 
 
 **Live magnet test, 2026-11-17.** `download` on a magnet link carrying only the Debian 13.7.0 netinst info hash and `udp://tracker.opentrackr.org:1337/announce` (no `.torrent` file; Debian's own tracker was unreachable that day). The UDP tracker returned 200 peers in 2 s, the 60,578-byte info dictionary arrived from a peer 16.7 s after start, and the whole run, metadata included, took 94.2 s with exit code 0. That is about 9.8 MiB/s over the 77 s download, with up to 49 peers connected. The ISO's SHA-256 matched Debian's `SHA256SUMS`. This used a different tracker and swarm from the Transmission comparison above, so it is not a like-for-like speed result.
 
-Not yet built (remaining stretch goals, in order): DHT (BEP 5), a terminal dashboard, several torrents at once, and speed limits.
+The DHT (BEP 5) is done as well, so a magnet link with nothing but an info hash works. The node joins through the well-known routers (`router.bittorrent.com` and others), keeps a 160-bucket Kademlia routing table with 8 nodes per bucket, and finds peers with an iterative `get_peers` lookup, 8 queries in flight with a 1.5 s timeout. It answers other nodes' `ping`, `find_node`, `get_peers` and `announce_peer` queries. Write tokens are a hash of the asker's IP with a secret that rotates every 5 minutes. A download searches the DHT three times a minute apart and then every 5 minutes, announcing its TCP port. Responses are accepted only from the address that was asked, and a full bucket keeps its nodes that still answer, so a flood of new IDs cannot push them out. IPv4 only, and the node ID is random per run.
+
+`cargo test --test live_dht -- --ignored --nocapture` joins the real DHT. On 2026-11-17 it reached 24 nodes in 3.5 s and found 402 peers for the Debian image in 12.4 s.
+
+**Live trackerless test, 2026-11-17.** `download "magnet:?xt=urn:btih:7acf8fb590b2060dd9c3146ef770169d593433b0"` gives the client the info hash and nothing else: no tracker, no peers. The DHT found peers, the info dictionary arrived 11.8 s after start, and the whole 756 MiB download finished in 165.1 s with up to 46 peers. The SHA-256 matched. 821 MiB was received, about 9% more than the file. The excess is probably duplicate blocks from endgame and request timeouts with the deeper queues, but that has not been checked yet.
+
+Not yet built (remaining stretch goals, in order): a terminal dashboard, several torrents at once, and speed limits.
 
 ## Reference
 
 - [BEP 3: The BitTorrent Protocol Specification](https://www.bittorrent.org/beps/bep_0003.html)
-- [BEP 12: Multitracker Metadata Extension](https://www.bittorrent.org/beps/bep_0012.html), [BEP 15: UDP Tracker Protocol](https://www.bittorrent.org/beps/bep_0015.html), [BEP 9: Extension for Peers to Send Metadata Files](https://www.bittorrent.org/beps/bep_0009.html), [BEP 10: Extension Protocol](https://www.bittorrent.org/beps/bep_0010.html), [BEP 20: Peer ID Conventions](https://www.bittorrent.org/beps/bep_0020.html), [BEP 23: Compact peer lists](https://www.bittorrent.org/beps/bep_0023.html)
+- [BEP 12: Multitracker Metadata Extension](https://www.bittorrent.org/beps/bep_0012.html), [BEP 15: UDP Tracker Protocol](https://www.bittorrent.org/beps/bep_0015.html), [BEP 9: Extension for Peers to Send Metadata Files](https://www.bittorrent.org/beps/bep_0009.html), [BEP 10: Extension Protocol](https://www.bittorrent.org/beps/bep_0010.html), [BEP 5: DHT Protocol](https://www.bittorrent.org/beps/bep_0005.html), [BEP 27: Private Torrents](https://www.bittorrent.org/beps/bep_0027.html), [BEP 20: Peer ID Conventions](https://www.bittorrent.org/beps/bep_0020.html), [BEP 23: Compact peer lists](https://www.bittorrent.org/beps/bep_0023.html)
 - Legout, Urvoy-Keller, Michiardi: *Rarest First and Choke Algorithms Are Enough* (IMC 2006)

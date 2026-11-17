@@ -17,6 +17,7 @@ use tracing::{debug, info, warn};
 
 use crate::bitfield::Bitfield;
 use crate::choke::{ChokeStrategy, PeerStats, TitForTat};
+use crate::dht::Dht;
 use crate::disk::{self, DiskCommand, DiskError, Storage, VerifyResult};
 use crate::metainfo::Torrent;
 use crate::peer::connection::{self, PeerCommand, PeerParams, PeerTarget, Timeouts};
@@ -55,6 +56,9 @@ pub fn queue_depth(rate: f64, min: usize) -> usize {
 pub fn max_in_progress(min: usize, piece_length: u64) -> usize {
     ((MAX_BUFFERED_BYTES / piece_length.max(1)) as usize).max(min)
 }
+/// DHT peer searches: three this far apart at the start, then this often.
+const DHT_FIRST_INTERVAL: Duration = Duration::from_secs(60);
+const DHT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const EVENT_QUEUE: usize = 1024;
 const DISK_QUEUE: usize = 256;
 
@@ -71,6 +75,8 @@ pub struct Config {
     pub timeouts: Timeouts,
     /// Peers to dial in addition to those the tracker returns.
     pub extra_peers: Vec<SocketAddr>,
+    /// DHT node to search for peers on (ignored for private torrents).
+    pub dht: Option<Dht>,
 }
 
 impl Config {
@@ -85,6 +91,7 @@ impl Config {
             max_in_progress: 16,
             timeouts: Timeouts::default(),
             extra_peers: Vec::new(),
+            dht: None,
         }
     }
 }
@@ -263,6 +270,17 @@ pub async fn run_download(
             events_tx.clone(),
             inner.clone(),
         )));
+    }
+    if let Some(dht) = config.dht.clone().filter(|_| !torrent.private) {
+        tokio::spawn(crate::dht::run_search(
+            dht,
+            torrent.info_hash,
+            Some(config.port),
+            events_tx.clone(),
+            inner.clone(),
+            DHT_FIRST_INTERVAL,
+            DHT_INTERVAL,
+        ));
     }
     if let Some(l) = listener {
         tokio::spawn(listen(l, events_tx.clone(), inner.clone()));

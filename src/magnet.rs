@@ -1,8 +1,8 @@
 //! Magnet links, and fetching a torrent's info dictionary from peers
 //! (BEP 9) so a download can start without a `.torrent` file.
 //!
-//! Fetching works like a small download of its own: the tracker task finds
-//! peers, several peers are tried at once, and each one that supports the
+//! Fetching works like a small download of its own: the tracker task and
+//! the DHT find peers, several peers are tried at once, and each one that supports the
 //! extension protocol is asked for every metadata piece. The first complete
 //! copy whose SHA-1 matches the magnet link's info hash wins. The metadata
 //! is small (tens of KiB), so asking one peer for all of it is simpler than
@@ -25,6 +25,7 @@ use tokio_util::codec::Framed;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
+use crate::dht::Dht;
 use crate::peer::connection::Timeouts;
 use crate::peer::extension::{self, MetadataMsg};
 use crate::peer::handshake::{self, Handshake};
@@ -40,7 +41,7 @@ pub enum MagnetError {
     NoInfoHash,
     #[error("invalid info hash {0:?}: expected 40 hex or 32 base32 characters")]
     BadInfoHash(String),
-    #[error("magnet link has no trackers and no peers to ask for metadata")]
+    #[error("magnet link has no trackers or peers, and the DHT is off")]
     NoSources,
     #[error("cancelled before the metadata arrived")]
     Cancelled,
@@ -151,6 +152,8 @@ pub struct FetchConfig {
     pub parallel: usize,
     /// How long one peer gets to deliver the whole info dictionary.
     pub per_peer: Duration,
+    /// DHT node to search for peers on, alongside the trackers.
+    pub dht: Option<Dht>,
 }
 
 impl FetchConfig {
@@ -161,6 +164,7 @@ impl FetchConfig {
             timeouts: Timeouts::default(),
             parallel: 8,
             per_peer: Duration::from_secs(30),
+            dht: None,
         }
     }
 }
@@ -186,7 +190,11 @@ pub async fn fetch_metadata(
     extra_peers: &[SocketAddr],
     token: &CancellationToken,
 ) -> Result<Fetched, MagnetError> {
-    if magnet.trackers.is_empty() && magnet.peers.is_empty() && extra_peers.is_empty() {
+    if magnet.trackers.is_empty()
+        && magnet.peers.is_empty()
+        && extra_peers.is_empty()
+        && cfg.dht.is_none()
+    {
         return Err(MagnetError::NoSources);
     }
     let inner = token.child_token();
@@ -211,6 +219,18 @@ pub async fn fetch_metadata(
             inner.clone(),
         ))
     });
+    if let Some(dht) = cfg.dht.clone() {
+        tokio::spawn(crate::dht::run_search(
+            dht,
+            magnet.info_hash,
+            None,
+            events_tx.clone(),
+            inner.clone(),
+            Duration::from_secs(20),
+            Duration::from_secs(60),
+        ));
+    }
+    let mut sources_open = tracker_task.is_some() || cfg.dht.is_some();
     drop(events_tx);
 
     let mut queue: VecDeque<SocketAddr> = VecDeque::new();
@@ -231,7 +251,6 @@ pub async fn fetch_metadata(
 
     let mut tasks: JoinSet<(SocketAddr, Result<Bytes, String>)> = JoinSet::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
-    let mut tracker_open = tracker_task.is_some();
 
     let result = loop {
         let now = Instant::now();
@@ -259,13 +278,13 @@ pub async fn fetch_metadata(
 
         tokio::select! {
             _ = token.cancelled() => break Err(MagnetError::Cancelled),
-            ev = events_rx.recv(), if tracker_open => match ev {
+            ev = events_rx.recv(), if sources_open => match ev {
                 Some(SessionEvent::PeersFound(addrs)) => {
-                    debug!("metadata: tracker returned {} peers", addrs.len());
+                    debug!("metadata: {} peers found", addrs.len());
                     add(&addrs, &mut queue);
                 }
                 Some(_) => {}
-                None => tracker_open = false,
+                None => sources_open = false,
             },
             Some(done) = tasks.join_next(), if !tasks.is_empty() => {
                 let Ok((addr, r)) = done else { continue };

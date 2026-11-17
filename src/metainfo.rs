@@ -51,6 +51,9 @@ pub struct Torrent {
     pub total_length: u64,
     pub info_hash: [u8; 20],
     pub multi_file: bool,
+    /// `info.private = 1` (BEP 27): peers come only from the trackers, never
+    /// from the DHT.
+    pub private: bool,
     /// The exact bytes of the `info` dictionary, served to peers that fetch
     /// metadata from us (BEP 9).
     pub info_bytes: Bytes,
@@ -148,6 +151,7 @@ impl Torrent {
             total_length,
             info_hash,
             multi_file,
+            private: info.get("private").and_then(Value::as_int) == Some(1),
             info_bytes,
         })
     }
