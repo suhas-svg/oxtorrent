@@ -271,7 +271,14 @@ pub async fn run_tracker(
     };
 
     let mut event = Some(Event::Started);
-    let mut completed_sent = progress.borrow().complete;
+    // `completed` reports a download that finished during this run, so it
+    // is never sent when every piece was already on disk at the start.
+    // That is judged from the bytes left, since the session sets its
+    // `complete` flag only after this task has started.
+    let mut completed_sent = {
+        let p = progress.borrow();
+        p.complete || (p.total > 0 && p.verified_bytes >= p.total)
+    };
     let mut announced = false;
     let mut retry = FIRST_RETRY;
 
