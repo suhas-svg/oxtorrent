@@ -39,20 +39,75 @@ impl Dashboard {
     /// lines (the peer table is cut to fit).
     pub fn render(&self, name: &str, p: &Progress, width: usize, height: usize) -> Vec<String> {
         let width = width.max(40);
+        let mut out = self.header(name, p, width);
+
+        // Piece map: two rows, each cell covering a run of pieces.
+        let cells = width.saturating_sub(8) * 2;
+        let map = piece_map(&p.pieces, cells);
+        let half = map.chars().count().div_ceil(2);
+        out.push(format!(
+            "pieces  {}",
+            map.chars().take(half).collect::<String>()
+        ));
+        out.push(format!(
+            "        {}",
+            map.chars().skip(half).collect::<String>()
+        ));
+        out.push("        █ verified  ▓ mostly  ▒ started  · missing".to_string());
+        out.push(String::new());
+
+        let rows = p.peer_rows.iter().map(|r| (r, p.piece_count)).collect();
+        peer_table(&mut out, rows, height);
+        out.into_iter().map(|l| cut(&l, width)).collect()
+    }
+
+    /// The view for several torrents: combined totals, one row per
+    /// torrent, then the peers of all of them.
+    pub fn render_many(&self, items: &[Progress], width: usize, height: usize) -> Vec<String> {
+        let width = width.max(40);
+        let all = Progress::combine(items);
+        let done = items.iter().filter(|p| p.complete).count();
+        let title = format!("{} torrents, {done} done", items.len());
+        let mut out = self.header(&title, &all, width);
+        let name_width = width.saturating_sub(52).clamp(10, 40);
+        out.push(format!(
+            "{:<name_width$} {:>6} {:>11} {:>11} {:>5} {:>7}",
+            "Torrent", "Done", "Down", "Up", "Peers", "ETA"
+        ));
+        for p in items {
+            let pct = if p.total > 0 {
+                format!("{:.1}%", p.verified_bytes as f64 * 100.0 / p.total as f64)
+            } else {
+                "-".to_string()
+            };
+            out.push(format!(
+                "{:<name_width$} {:>6} {:>11} {:>11} {:>5} {:>7}",
+                cut(&p.name, name_width),
+                pct,
+                format!("{}/s", human_bytes(p.download_rate)),
+                format!("{}/s", human_bytes(p.upload_rate)),
+                p.peers,
+                eta(p),
+            ));
+        }
+        out.push(String::new());
+        let rows = items
+            .iter()
+            .flat_map(|p| p.peer_rows.iter().map(move |r| (r, p.piece_count)))
+            .collect();
+        peer_table(&mut out, rows, height);
+        out.into_iter().map(|l| cut(&l, width)).collect()
+    }
+
+    /// Title, progress bar, rates and the speed sparkline.
+    fn header(&self, name: &str, p: &Progress, width: usize) -> Vec<String> {
         let mut out = Vec::new();
         let pct = if p.total > 0 {
             p.verified_bytes as f64 * 100.0 / p.total as f64
         } else {
             0.0
         };
-        let left = p.total.saturating_sub(p.verified_bytes);
-        let eta = if p.complete {
-            "done".to_string()
-        } else if p.download_rate > 1.0 {
-            format_duration(left as f64 / p.download_rate)
-        } else {
-            "--".to_string()
-        };
+        let eta = eta(p);
 
         out.push(format!("Oxtorrent · {name}"));
         let bar_width = width.saturating_sub(42).clamp(10, 60);
@@ -90,28 +145,30 @@ impl Dashboard {
             human_bytes(max)
         ));
         out.push(String::new());
+        out
+    }
+}
 
-        // Piece map: two rows, each cell covering a run of pieces.
-        let cells = width.saturating_sub(8) * 2;
-        let map = piece_map(&p.pieces, cells);
-        let half = map.chars().count().div_ceil(2);
-        out.push(format!(
-            "pieces  {}",
-            map.chars().take(half).collect::<String>()
-        ));
-        out.push(format!(
-            "        {}",
-            map.chars().skip(half).collect::<String>()
-        ));
-        out.push("        █ verified  ▓ mostly  ▒ started  · missing".to_string());
-        out.push(String::new());
+fn eta(p: &Progress) -> String {
+    let left = p.total.saturating_sub(p.verified_bytes);
+    if p.complete {
+        "done".to_string()
+    } else if p.download_rate > 1.0 {
+        format_duration(left as f64 / p.download_rate)
+    } else {
+        "--".to_string()
+    }
+}
 
+/// The peer table, fastest first, cut to fit `height` lines in all. Each
+/// row comes with its torrent's piece count, for the "Has" column.
+fn peer_table(out: &mut Vec<String>, mut rows: Vec<(&PeerRow, usize)>, height: usize) {
+    {
         out.push(format!(
             "{:<22} {:<18} {:>11} {:>11} {:<5} {:>4} {:>5}",
             "Peer", "Client", "Down", "Up", "Flags", "Reqs", "Has"
         ));
-        let mut rows: Vec<&PeerRow> = p.peer_rows.iter().collect();
-        rows.sort_by(|a, b| {
+        rows.sort_by(|(a, _), (b, _)| {
             b.down_rate
                 .total_cmp(&a.down_rate)
                 .then(b.up_rate.total_cmp(&a.up_rate))
@@ -119,9 +176,9 @@ impl Dashboard {
         });
         let room = height.saturating_sub(out.len() + 1);
         let shown = rows.len().min(room);
-        for r in &rows[..shown] {
+        for (r, piece_count) in &rows[..shown] {
             let has = (r.pieces * 100)
-                .checked_div(p.piece_count)
+                .checked_div(*piece_count)
                 .map_or_else(|| "-".to_string(), |pct| format!("{pct}%"));
             out.push(format!(
                 "{:<22} {:<18} {:>11} {:>11} {:<5} {:>4} {:>5}",
@@ -137,7 +194,6 @@ impl Dashboard {
         if rows.len() > shown {
             out.push(format!("… and {} more", rows.len() - shown));
         }
-        out.into_iter().map(|l| cut(&l, width)).collect()
     }
 }
 
@@ -196,9 +252,9 @@ fn cut(s: &str, n: usize) -> String {
     }
 }
 
-/// Draws the dashboard once a second until `token` is cancelled or the
-/// session stops publishing, then restores the screen.
-pub async fn run(mut rx: watch::Receiver<Progress>, token: CancellationToken, name: String) {
+/// Draws the dashboard once a second until `token` is cancelled, then
+/// restores the screen.
+pub async fn run(rxs: Vec<watch::Receiver<Progress>>, token: CancellationToken) {
     let mut out = std::io::stdout();
     if execute!(out, terminal::EnterAlternateScreen, cursor::Hide).is_err() {
         return;
@@ -209,12 +265,16 @@ pub async fn run(mut rx: watch::Receiver<Progress>, token: CancellationToken, na
         tokio::select! {
             _ = tick.tick() => {}
             _ = token.cancelled() => break,
-            r = rx.changed() => if r.is_err() { break } else { continue },
         }
-        let p = rx.borrow().clone();
-        dash.push(&p);
+        let snaps: Vec<Progress> = rxs.iter().map(|r| r.borrow().clone()).collect();
         let (w, h) = terminal::size().unwrap_or((100, 30));
-        let lines = dash.render(&name, &p, w as usize, h as usize);
+        let lines = if let [p] = snaps.as_slice() {
+            dash.push(p);
+            dash.render(&p.name, p, w as usize, h as usize)
+        } else {
+            dash.push(&Progress::combine(&snaps));
+            dash.render_many(&snaps, w as usize, h as usize)
+        };
         let _ = queue!(
             out,
             cursor::MoveTo(0, 0),
@@ -252,6 +312,7 @@ mod tests {
         pieces.extend(vec![PieceStatus::InProgress; 10]);
         pieces.extend(vec![PieceStatus::Missing; 40]);
         Progress {
+            name: "test.iso".to_string(),
             total: 100 * 262_144,
             verified_bytes: 50 * 262_144,
             pieces_done: 50,
@@ -301,6 +362,32 @@ mod tests {
         assert!(lines.len() <= 20);
         assert!(lines.last().unwrap().starts_with("… and "));
         assert!(lines.iter().all(|l| l.chars().count() <= 80));
+    }
+
+    #[test]
+    fn several_torrents_get_a_row_each_and_shared_peer_table() {
+        let mut a = progress();
+        a.name = "first.iso".to_string();
+        let mut b = progress();
+        b.name = "second.iso".to_string();
+        b.complete = true;
+        b.verified_bytes = b.total;
+        b.peer_rows = vec![row(9, 9000.0)];
+        let mut d = Dashboard::default();
+        d.push(&Progress::combine(&[a.clone(), b.clone()]));
+        let lines = d.render_many(&[a, b], 100, 40);
+        assert_eq!(lines[0], "Oxtorrent · 2 torrents, 1 done");
+        assert!(lines[1].starts_with(" 75.0%  ["), "{}", lines[1]);
+        assert!(lines[2].contains("peers 6"));
+        let first = lines.iter().find(|l| l.starts_with("first.iso")).unwrap();
+        assert!(first.contains("50.0%"), "{first}");
+        let second = lines.iter().find(|l| l.starts_with("second.iso")).unwrap();
+        assert!(second.contains("100.0%") && second.contains("done"), "{second}");
+        // Peers of both torrents, fastest first.
+        let table: Vec<&String> = lines.iter().filter(|l| l.starts_with("10.0.0.1")).collect();
+        assert_eq!(table.len(), 4);
+        assert!(table[0].starts_with("10.0.0.1:9 "));
+        assert!(lines.iter().all(|l| l.chars().count() <= 100));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Argument parsing and progress output.
 
+use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -17,7 +18,8 @@ use crate::dht::{Dht, DhtConfig};
 use crate::magnet::{self, FetchConfig, Magnet, MagnetError};
 use crate::metainfo::Torrent;
 use crate::peer::generate_peer_id;
-use crate::session::{self, Config, Progress};
+use crate::router::Router;
+use crate::session::{self, Config, Inbound, Outcome, Progress};
 use crate::sim;
 
 #[derive(Parser, Debug)]
@@ -46,15 +48,17 @@ enum Command {
 
 #[derive(clap::Args, Debug)]
 struct DownloadArgs {
-    /// Path to a .torrent file, or a magnet link (quote it in the shell).
-    torrent: String,
+    /// Paths to .torrent files or magnet links (quote them in the shell).
+    /// Several are downloaded at once, sharing the port and the DHT.
+    #[arg(required = true, value_name = "TORRENT")]
+    torrents: Vec<String>,
     /// Where to save the files.
     #[arg(long, default_value = ".")]
     output: PathBuf,
     /// TCP port for incoming peers.
     #[arg(long, default_value_t = 6881)]
     port: u16,
-    /// Maximum simultaneous connections.
+    /// Maximum simultaneous connections, shared evenly between torrents.
     #[arg(long, default_value_t = 50)]
     max_peers: usize,
     /// Keep uploading after the download completes (until Ctrl-C).
@@ -156,28 +160,60 @@ fn info(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// A torrent named on the command line, before its metadata is known.
+enum Source {
+    File(Torrent),
+    Magnet(Magnet),
+}
+
+impl Source {
+    fn info_hash(&self) -> [u8; 20] {
+        match self {
+            Source::File(t) => t.info_hash,
+            Source::Magnet(m) => m.info_hash,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Source::File(t) => t.name.clone(),
+            Source::Magnet(m) => m
+                .name
+                .clone()
+                .unwrap_or_else(|| crate::metainfo::hex(&m.info_hash)),
+        }
+    }
+
+    fn private(&self) -> bool {
+        matches!(self, Source::File(t) if t.private)
+    }
+}
+
 async fn download(args: DownloadArgs) -> Result<u8> {
     let DownloadArgs {
-        torrent: source,
+        torrents,
         output,
         port,
         max_peers,
         seed,
         pipeline,
-        mut peers,
+        peers,
         no_dht,
         dashboard,
     } = args;
-    let use_dht = !no_dht;
-    let magnet_link = if source.starts_with("magnet:") {
-        Some(Magnet::parse(&source).context("invalid magnet link")?)
-    } else {
-        None
-    };
-    let file_torrent = match magnet_link {
-        None => Some(load(&PathBuf::from(&source))?),
-        Some(_) => None,
-    };
+    let mut sources = Vec::new();
+    let mut seen = HashSet::new();
+    for s in &torrents {
+        let src = if s.starts_with("magnet:") {
+            Source::Magnet(Magnet::parse(s).with_context(|| format!("invalid magnet link {s}"))?)
+        } else {
+            Source::File(load(&PathBuf::from(s))?)
+        };
+        if !seen.insert(src.info_hash()) {
+            anyhow::bail!("{} is given more than once", src.label());
+        }
+        sources.push(src);
+    }
     std::fs::create_dir_all(&output)
         .with_context(|| format!("cannot create output folder {}", output.display()))?;
 
@@ -205,10 +241,13 @@ async fn download(args: DownloadArgs) -> Result<u8> {
         }
     });
 
+    // Every torrent is reached on the same port: the router reads each
+    // incoming handshake and passes the connection to the right session.
+    let router = listener.map(|l| Router::spawn(l, token.clone()));
+
     // The DHT listens on the same port number as the TCP listener, over UDP.
-    // It joins the network in the background while the download starts.
-    let private = file_torrent.as_ref().is_some_and(|t| t.private);
-    let dht = if use_dht && !private {
+    // It joins the network in the background while the downloads start.
+    let dht = if !no_dht && sources.iter().any(|s| !s.private()) {
         match Dht::start(
             DhtConfig {
                 port: real_port,
@@ -228,67 +267,116 @@ async fn download(args: DownloadArgs) -> Result<u8> {
         None
     };
 
-    let peer_id = generate_peer_id();
-    let torrent = match (file_torrent, magnet_link) {
-        (Some(t), _) => t,
-        (None, Some(m)) => {
-            let mut fetch = FetchConfig::new(peer_id, real_port);
-            fetch.dht = dht.clone();
-            match torrent_from_magnet(&m, &fetch, &mut peers, &output, &token).await? {
-                Some(t) => t,
-                None => {
-                    eprintln!("error: interrupted before the metadata arrived");
-                    return Ok(2);
-                }
+    let mut base = Config::new(output, generate_peer_id());
+    base.port = real_port;
+    // --max-peers is the total for the run, shared evenly.
+    base.max_peers = (max_peers / sources.len()).max(1);
+    base.seed = seed;
+    base.pipeline = pipeline.max(1);
+    base.extra_peers = peers;
+    base.dht = dht;
+
+    let mut receivers = Vec::new();
+    let mut tasks = Vec::new();
+    for src in sources {
+        let label = src.label();
+        let (tx, rx) = watch::channel(Progress {
+            name: label.clone(),
+            ..Progress::default()
+        });
+        receivers.push(rx);
+        let inbound = router
+            .as_ref()
+            .map_or(Inbound::None, |r| Inbound::Routed(r.register(src.info_hash())));
+        let task = tokio::spawn(run_one(src, base.clone(), inbound, tx, token.clone()));
+        tasks.push((label, task));
+    }
+
+    let printer = if dashboard && std::io::stdout().is_terminal() {
+        tokio::spawn(crate::dashboard::run(receivers, token.clone()))
+    } else {
+        tokio::spawn(print_progress(receivers, token.clone()))
+    };
+    let mut results = Vec::new();
+    for (label, task) in tasks {
+        results.push((label, task.await));
+    }
+    token.cancel();
+    let _ = printer.await;
+
+    let many = results.len() > 1;
+    let (mut failed, mut incomplete) = (false, false);
+    for (label, r) in results {
+        let prefix = if many {
+            format!("{label}: ")
+        } else {
+            String::new()
+        };
+        match r {
+            Ok(Ok(Some(o))) if o.complete => eprintln!(
+                "{prefix}Done: all pieces verified ({} downloaded, {} uploaded).",
+                human_bytes(o.stats.downloaded as f64),
+                human_bytes(o.stats.uploaded as f64)
+            ),
+            Ok(Ok(Some(_))) => {
+                incomplete = true;
+                eprintln!(
+                    "error: {prefix}download interrupted before completion; \
+                     run the same command again to resume"
+                );
+            }
+            Ok(Ok(None)) => {
+                incomplete = true;
+                eprintln!("error: {prefix}interrupted before the metadata arrived");
+            }
+            Ok(Err(e)) => {
+                failed = true;
+                eprintln!("error: {prefix}{e:#}");
+            }
+            Err(e) => {
+                failed = true;
+                eprintln!("error: {prefix}{e}");
             }
         }
-        (None, None) => unreachable!("either a file or a magnet link"),
+    }
+    Ok(if failed {
+        1
+    } else if incomplete {
+        2
+    } else {
+        0
+    })
+}
+
+/// Fetches a magnet link's metadata if needed, then runs the download.
+/// Returns `None` if cancelled before the metadata arrived.
+async fn run_one(
+    src: Source,
+    mut config: Config,
+    inbound: Inbound,
+    progress_tx: watch::Sender<Progress>,
+    token: CancellationToken,
+) -> Result<Option<Outcome>> {
+    let torrent = match src {
+        Source::File(t) => t,
+        Source::Magnet(m) => {
+            let mut fetch = FetchConfig::new(config.peer_id, config.port);
+            fetch.dht = config.dht.clone();
+            let dir = config.output_dir.clone();
+            match torrent_from_magnet(&m, &fetch, &mut config.extra_peers, &dir, &token).await? {
+                Some(t) => t,
+                None => return Ok(None),
+            }
+        }
     };
-
-    let mut config = Config::new(output, peer_id);
-    config.port = real_port;
-    config.max_peers = max_peers.max(1);
-    config.seed = seed;
-    config.pipeline = pipeline.max(1);
-    config.extra_peers = peers;
-    config.dht = dht;
-
     eprintln!(
         "Downloading {} ({}, {} pieces)",
         torrent.name,
         human_bytes(torrent.total_length as f64),
         torrent.piece_count()
     );
-
-    let (progress_tx, progress_rx) = watch::channel(Progress::default());
-    let printer = if dashboard && std::io::stdout().is_terminal() {
-        tokio::spawn(crate::dashboard::run(
-            progress_rx,
-            token.clone(),
-            torrent.name.clone(),
-        ))
-    } else {
-        tokio::spawn(print_progress(progress_rx, token.clone()))
-    };
-    let outcome =
-        session::run_download(torrent, config, listener, progress_tx, token.clone()).await;
-    token.cancel();
-    let _ = printer.await;
-
-    let outcome = outcome?;
-    if outcome.complete {
-        eprintln!(
-            "Done: all pieces verified ({} downloaded, {} uploaded).",
-            human_bytes(outcome.stats.downloaded as f64),
-            human_bytes(outcome.stats.uploaded as f64)
-        );
-        Ok(0)
-    } else {
-        eprintln!(
-            "error: download interrupted before completion; run the same command again to resume"
-        );
-        Ok(2)
-    }
+    let outcome = session::run_download(torrent, config, inbound, progress_tx, token).await?;
+    Ok(Some(outcome))
 }
 
 /// Fetches the info dictionary for a magnet link and saves it as a
@@ -327,7 +415,11 @@ async fn torrent_from_magnet(
     Ok(Some(torrent))
 }
 
-async fn print_progress(mut rx: watch::Receiver<Progress>, token: CancellationToken) {
+/// Prints progress once a second until `token` is cancelled. With one
+/// torrent that is its status line. With several, a terminal gets one
+/// combined line, and other outputs (a log file, a pipe) get a line per
+/// torrent, prefixed with its name.
+async fn print_progress(rxs: Vec<watch::Receiver<Progress>>, token: CancellationToken) {
     let tty = std::io::stdout().is_terminal();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut printed = false;
@@ -335,18 +427,19 @@ async fn print_progress(mut rx: watch::Receiver<Progress>, token: CancellationTo
         tokio::select! {
             _ = tick.tick() => {}
             _ = token.cancelled() => break,
-            r = rx.changed() => if r.is_err() { break } else { continue },
         }
-        let p = rx.borrow().clone();
-        if p.total == 0 {
+        let snaps: Vec<Progress> = rxs.iter().map(|r| r.borrow().clone()).collect();
+        let lines = progress_lines(&snaps, tty);
+        if lines.is_empty() {
             continue;
         }
-        let line = status_line(&p);
         let mut out = std::io::stdout().lock();
-        if tty {
-            let _ = write!(out, "\r{line:<100}");
-        } else {
-            let _ = writeln!(out, "{line}");
+        for line in lines {
+            if tty {
+                let _ = write!(out, "\r{line:<100}");
+            } else {
+                let _ = writeln!(out, "{line}");
+            }
         }
         let _ = out.flush();
         printed = true;
@@ -354,6 +447,29 @@ async fn print_progress(mut rx: watch::Receiver<Progress>, token: CancellationTo
     if printed && tty {
         println!();
     }
+}
+
+pub fn progress_lines(snaps: &[Progress], tty: bool) -> Vec<String> {
+    let started: Vec<&Progress> = snaps.iter().filter(|p| p.total > 0).collect();
+    if started.is_empty() {
+        return Vec::new();
+    }
+    if snaps.len() == 1 {
+        return vec![status_line(started[0])];
+    }
+    if tty {
+        let done = snaps.iter().filter(|p| p.complete).count();
+        let all = Progress::combine(snaps);
+        return vec![format!(
+            "{done}/{} done  {}",
+            snaps.len(),
+            status_line(&all)
+        )];
+    }
+    started
+        .iter()
+        .map(|p| format!("{}: {}", p.name, status_line(p)))
+        .collect()
 }
 
 pub fn status_line(p: &Progress) -> String {
@@ -416,5 +532,40 @@ mod tests {
         assert_eq!(human_bytes(1536.0), "1.5 KiB");
         assert_eq!(format_duration(3725.0), "1h02m");
         assert_eq!(format_duration(65.0), "1m05s");
+    }
+
+    #[test]
+    fn progress_lines_for_one_and_several_torrents() {
+        let p = |name: &str, done: u64, complete: bool| Progress {
+            name: name.to_string(),
+            total: 100,
+            verified_bytes: done,
+            piece_count: 10,
+            pieces_done: (done / 10) as usize,
+            peers: 2,
+            complete,
+            ..Progress::default()
+        };
+        let not_started = Progress::default();
+        assert!(progress_lines(std::slice::from_ref(&not_started), true).is_empty());
+
+        let one = progress_lines(&[p("a", 50, false)], true);
+        assert_eq!(one.len(), 1);
+        assert!(one[0].starts_with(" 50.0%"), "{}", one[0]);
+
+        let both = [p("a", 50, false), p("b", 100, true)];
+        let tty = progress_lines(&both, true);
+        assert_eq!(tty.len(), 1);
+        assert!(tty[0].starts_with("1/2 done   75.0%"), "{}", tty[0]);
+        assert!(tty[0].contains("peers 4"));
+
+        let log = progress_lines(&both, false);
+        assert_eq!(log.len(), 2);
+        assert!(log[0].starts_with("a:  50.0%"), "{}", log[0]);
+        assert!(log[1].starts_with("b: 100.0%"), "{}", log[1]);
+
+        // A magnet still fetching its metadata is left out of the log lines.
+        let log = progress_lines(&[p("a", 50, false), not_started], false);
+        assert_eq!(log.len(), 1);
     }
 }

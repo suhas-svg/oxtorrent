@@ -24,7 +24,12 @@ target/release/oxtorrent download debian.iso.torrent --output ~/Downloads --seed
 
 # Or start from a magnet link (quote it: it contains &)
 target/release/oxtorrent download "magnet:?xt=urn:btih:7acf8fb590b2060dd9c3146ef770169d593433b0&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce" --output ~/Downloads
+
+# Several at once, files and magnet links mixed
+target/release/oxtorrent download debian.iso.torrent ubuntu.iso.torrent "magnet:?xt=urn:btih:..." --output ~/Downloads
 ```
+
+Several torrents in one `download` run at the same time and share one TCP port, one DHT node and one peer ID. The listener reads each incoming handshake and hands the connection to the torrent it names, so other peers reach every torrent on the same port; connections for a torrent not in the run are closed. Each torrent otherwise has its own session (picker, choker, peers, tracker), and `--max-peers` is split evenly between them. Naming the same torrent twice is an error.
 
 With a magnet link, the client first fetches the torrent's info dictionary from peers (BEP 9), checks its SHA-1 against the link's info hash and saves it as `<name>.torrent` in the output folder. Running `download` on that file later resumes without fetching the metadata again. The link's `xt` (hex or base32 info hash), `tr` (trackers), `dn` (name) and `x.pe` (peers) fields are read.
 
@@ -32,18 +37,19 @@ With a magnet link, the client first fetches the torrent's info dictionary from 
 |---|---|---|
 | `--output <dir>` | current folder | Where to save the files |
 | `--port <n>` | 6881 | TCP port for incoming peers |
-| `--max-peers <n>` | 50 | Maximum simultaneous connections, incoming and outgoing together |
+| `--max-peers <n>` | 50 | Maximum simultaneous connections, incoming and outgoing together, shared evenly between torrents |
 | `--seed` | off | Keep uploading after the download completes |
 | `--pipeline <n>` | 5 | Minimum outstanding block requests per peer; each peer's queue grows to about 3 s of its measured rate (up to 128 blocks) |
-| `--peer <ip:port>` | none | Extra peer to dial; may be repeated (useful on a LAN) |
+| `--peer <ip:port>` | none | Extra peer to dial for every torrent; may be repeated (useful on a LAN) |
 | `--no-dht` | DHT on | Find peers only through trackers and `--peer`. The DHT uses UDP on the same port number as `--port`, and is never used for private torrents (BEP 27). |
 | `--dashboard` | off | Full-screen view instead of the status line (see below). Ignored when standard output is not a terminal. |
 | `-v`, `-vv`, `-vvv` | off | Info, debug or trace logs on standard error |
 
 - `download` prints one status line per second on standard output: percent done, download and upload speed, connected peers and time left. Logs go to standard error, so the status line stays clean.
 - `--dashboard` redraws the whole terminal once a second: a progress bar with time left, download and upload rates, a speed sparkline for the last 60 s, a two-row map of the pieces (verified, mostly done, started, missing), and a table of peers sorted by download speed with their client, rates, flags, outstanding requests and share of pieces. The flags are `D` downloading from it, `d` interested but choked by it, `U` uploading to it, `u` it is interested but we choke it. The normal screen comes back when the download ends or on Ctrl-C.
+- With several torrents, a terminal shows one combined line (`1/3 done` and the totals); a file or pipe gets one line per torrent each second, prefixed with its name. `--dashboard` adds a row per torrent above a peer table covering all of them.
 - Ctrl-C shuts down cleanly. The client tells the tracker it has stopped, closes the connections and flushes the files. A second Ctrl-C exits at once.
-- Exit code `0` means the download completed and every piece verified. Code `2` means it was interrupted, and running the same command again resumes it. Code `1` means an error, with the reason printed to standard error.
+- Exit code `0` means every download completed and every piece verified. Code `2` means one was interrupted, and running the same command again resumes it. Code `1` means an error in any of them, with the reason printed to standard error. With several torrents, the final report has one line per torrent.
 - Resuming re-hashes whatever is already on disk and keeps the pieces that match, so it is correct even after a crash.
 
 ## Architecture
@@ -96,6 +102,7 @@ All channels are bounded. The session never waits on a peer: it uses `try_send`,
 | [`session`](src/session.rs) | The coordinator loop |
 | [`sim`](src/sim/mod.rs) | Discrete-event swarm simulator |
 | [`cli`](src/cli.rs) | Arguments and the progress line |
+| [`router`](src/router.rs) | The shared listener: reads each incoming handshake and passes the connection to the session for that info hash |
 | [`dashboard`](src/dashboard.rs) | The `--dashboard` view. Rendering is plain text from a progress snapshot, so it is tested without a terminal; `crossterm` only draws it. |
 
 ### Design notes
@@ -312,9 +319,9 @@ The DHT (BEP 5) is done as well, so a magnet link with nothing but an info hash 
 
 **Where the extra data came from.** Counters added to the session (logged at the end with `-v`) split a later run's excess into blocks that arrived after their piece was already verified (25 MiB, by far the largest), blocks received twice before verification (6 MiB) and failed pieces (none). 3,483 endgame duplicate requests had been sent. The cause was endgame: once every piece was requested, each outstanding block was asked of every peer, and with queues several seconds deep most of those copies landed after another peer had delivered. Endgame now asks at most 2 peers for any block, and duplicates the oldest requests first, since those are the likeliest to be stuck. Re-running the same trackerless magnet download afterwards received 766.6 MiB for the 756 MiB file (1.4% extra) and finished in 110 s with up to 47 peers. The SHA-256 matched again.
 
-The terminal dashboard (`--dashboard`) is done too.
+The terminal dashboard (`--dashboard`) and several torrents at once are done too. `tests/multi.rs` checks the second one: a seeder serves two torrents on one port to a leecher fetching both at once, and both files arrive intact only if every connection reaches the right session. It has not been tried on live swarms yet.
 
-Not yet built (remaining stretch goals, in order): several torrents at once, and speed limits.
+Not yet built (remaining stretch goal): speed limits.
 
 ## Reference
 

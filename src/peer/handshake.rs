@@ -69,19 +69,48 @@ where
     if initiator {
         stream.write_all(&ours.to_bytes()).await?;
     }
+    let theirs = read(stream).await?;
+    check(ours, &theirs)?;
+    if !initiator {
+        stream.write_all(&ours.to_bytes()).await?;
+    }
+    Ok(theirs)
+}
+
+/// Reads the other side's handshake without answering. The shared
+/// listener uses this to learn which torrent an incoming peer wants.
+pub async fn read<S>(stream: &mut S) -> Result<Handshake, HandshakeError>
+where
+    S: AsyncRead + Unpin,
+{
     let mut buf = [0u8; HANDSHAKE_LEN];
     stream.read_exact(&mut buf).await?;
-    let theirs = Handshake::parse(&buf)?;
+    Handshake::parse(&buf)
+}
+
+/// Finishes an incoming handshake whose first half was already read by
+/// [`read`]: checks it and sends ours.
+pub async fn answer<S>(
+    stream: &mut S,
+    ours: &Handshake,
+    theirs: Handshake,
+) -> Result<Handshake, HandshakeError>
+where
+    S: AsyncWrite + Unpin,
+{
+    check(ours, &theirs)?;
+    stream.write_all(&ours.to_bytes()).await?;
+    Ok(theirs)
+}
+
+fn check(ours: &Handshake, theirs: &Handshake) -> Result<(), HandshakeError> {
     if theirs.info_hash != ours.info_hash {
         return Err(HandshakeError::InfoHashMismatch);
     }
     if theirs.peer_id == ours.peer_id {
         return Err(HandshakeError::SelfConnection);
     }
-    if !initiator {
-        stream.write_all(&ours.to_bytes()).await?;
-    }
-    Ok(theirs)
+    Ok(())
 }
 
 #[cfg(test)]

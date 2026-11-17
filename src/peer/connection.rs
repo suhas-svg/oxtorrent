@@ -30,6 +30,9 @@ pub enum PeerCommand {
 pub enum PeerTarget {
     Outgoing(SocketAddr),
     Incoming(TcpStream),
+    /// An incoming connection whose handshake the shared listener has
+    /// already read, to pick the torrent.
+    Routed(TcpStream, Handshake),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -119,26 +122,35 @@ async fn run_inner(
     p: &PeerParams,
     mut cmds: mpsc::Receiver<PeerCommand>,
 ) -> Result<(), PeerError> {
-    let (mut stream, initiator) = match target {
+    let mut ours = Handshake::new(p.info_hash, p.our_id);
+    extension::set_extension_bit(&mut ours.reserved);
+    let (mut stream, initiator, read) = match target {
         PeerTarget::Outgoing(addr) => {
             let s = timeout(p.timeouts.connect, TcpStream::connect(addr))
                 .await
                 .map_err(|_| PeerError::ConnectTimeout)?
                 .map_err(PeerError::Connect)?;
-            (s, true)
+            (s, true, None)
         }
-        PeerTarget::Incoming(s) => (s, false),
+        PeerTarget::Incoming(s) => (s, false, None),
+        PeerTarget::Routed(s, hs) => (s, false, Some(hs)),
     };
     let _ = stream.set_nodelay(true);
 
-    let mut ours = Handshake::new(p.info_hash, p.our_id);
-    extension::set_extension_bit(&mut ours.reserved);
-    let theirs = timeout(
-        p.timeouts.handshake,
-        handshake::exchange(&mut stream, &ours, initiator),
-    )
-    .await
-    .map_err(|_| PeerError::HandshakeTimeout)??;
+    let theirs = match read {
+        Some(hs) => timeout(
+            p.timeouts.handshake,
+            handshake::answer(&mut stream, &ours, hs),
+        )
+        .await
+        .map_err(|_| PeerError::HandshakeTimeout)??,
+        None => timeout(
+            p.timeouts.handshake,
+            handshake::exchange(&mut stream, &ours, initiator),
+        )
+        .await
+        .map_err(|_| PeerError::HandshakeTimeout)??,
+    };
 
     let framed = Framed::new(stream, MessageCodec::new(p.piece_count));
     let (mut sink, mut source) = framed.split();

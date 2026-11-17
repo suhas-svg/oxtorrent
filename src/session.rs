@@ -21,6 +21,7 @@ use crate::dht::Dht;
 use crate::disk::{self, DiskCommand, DiskError, Storage, VerifyResult};
 use crate::metainfo::Torrent;
 use crate::peer::connection::{self, PeerCommand, PeerParams, PeerTarget, Timeouts};
+use crate::peer::handshake::Handshake;
 use crate::peer::message::Message;
 use crate::picker::{BlockOutcome, Picker, PieceStatus, RarestFirst};
 use crate::tracker::{self, TrackerConfig};
@@ -99,6 +100,8 @@ impl Config {
 /// Snapshot published once a second for the progress line and the tracker.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Progress {
+    /// The torrent's name (empty until the session starts).
+    pub name: String,
     pub total: u64,
     pub verified_bytes: u64,
     pub pieces_done: usize,
@@ -113,6 +116,33 @@ pub struct Progress {
     pub peer_rows: Vec<PeerRow>,
     /// State of every piece, for the dashboard's piece map.
     pub pieces: Vec<PieceStatus>,
+}
+
+impl Progress {
+    /// Totals over several downloads: sizes, rates and peers summed, peer
+    /// rows joined, complete only when all are. The piece map is left
+    /// empty, since piece numbers differ between torrents.
+    pub fn combine(items: &[Progress]) -> Progress {
+        let mut all = Progress {
+            name: format!("{} torrents", items.len()),
+            complete: !items.is_empty(),
+            ..Progress::default()
+        };
+        for p in items {
+            all.total += p.total;
+            all.verified_bytes += p.verified_bytes;
+            all.pieces_done += p.pieces_done;
+            all.piece_count += p.piece_count;
+            all.downloaded += p.downloaded;
+            all.uploaded += p.uploaded;
+            all.download_rate += p.download_rate;
+            all.upload_rate += p.upload_rate;
+            all.peers += p.peers;
+            all.complete &= p.complete;
+            all.peer_rows.extend(p.peer_rows.iter().cloned());
+        }
+        all
+    }
 }
 
 /// A connected peer as the dashboard shows it.
@@ -186,7 +216,9 @@ pub enum SessionError {
 /// Everything that reaches the session from other tasks.
 pub enum SessionEvent {
     PeersFound(Vec<SocketAddr>),
-    Incoming(TcpStream, SocketAddr),
+    /// An incoming connection, with its handshake if the shared listener
+    /// already read it.
+    Incoming(TcpStream, SocketAddr, Option<Handshake>),
     PeerConnected {
         key: PeerKey,
         peer_id: [u8; 20],
@@ -263,10 +295,11 @@ impl Peer {
 pub async fn run_download(
     torrent: Torrent,
     config: Config,
-    listener: Option<TcpListener>,
+    inbound: impl Into<Inbound>,
     progress_tx: watch::Sender<Progress>,
     token: CancellationToken,
 ) -> Result<Outcome, SessionError> {
+    let inbound = inbound.into();
     let torrent = Arc::new(torrent);
 
     // Open files and re-hash whatever is already there.
@@ -333,8 +366,14 @@ pub async fn run_download(
             DHT_INTERVAL,
         ));
     }
-    if let Some(l) = listener {
-        tokio::spawn(listen(l, events_tx.clone(), inner.clone()));
+    match inbound {
+        Inbound::None => {}
+        Inbound::Listener(l) => {
+            tokio::spawn(listen(l, events_tx.clone(), inner.clone()));
+        }
+        Inbound::Routed(rx) => {
+            tokio::spawn(forward_routed(rx, events_tx.clone(), inner.clone()));
+        }
     }
     if !config.extra_peers.is_empty() {
         session.add_candidates(config.extra_peers.clone());
@@ -371,6 +410,46 @@ pub async fn run_download(
     Ok(Outcome { complete, stats })
 }
 
+/// Where a download's incoming connections come from.
+pub enum Inbound {
+    /// None: outgoing connections only.
+    None,
+    /// The download has the listening socket to itself.
+    Listener(TcpListener),
+    /// A shared [`crate::router::Router`] hands over connections for this
+    /// torrent, with their handshake already read.
+    Routed(mpsc::Receiver<crate::router::RoutedPeer>),
+}
+
+impl From<Option<TcpListener>> for Inbound {
+    fn from(l: Option<TcpListener>) -> Self {
+        l.map_or(Inbound::None, Inbound::Listener)
+    }
+}
+
+impl From<TcpListener> for Inbound {
+    fn from(l: TcpListener) -> Self {
+        Inbound::Listener(l)
+    }
+}
+
+async fn forward_routed(
+    mut rx: mpsc::Receiver<crate::router::RoutedPeer>,
+    events: mpsc::Sender<SessionEvent>,
+    token: CancellationToken,
+) {
+    loop {
+        let peer = tokio::select! {
+            _ = token.cancelled() => break,
+            p = rx.recv() => match p { Some(p) => p, None => break },
+        };
+        let ev = SessionEvent::Incoming(peer.stream, peer.addr, Some(peer.handshake));
+        if events.send(ev).await.is_err() {
+            break;
+        }
+    }
+}
+
 /// Accepts incoming connections and hands them to the session, which
 /// decides whether to keep them.
 pub async fn listen(
@@ -383,7 +462,7 @@ pub async fn listen(
             _ = token.cancelled() => break,
             r = listener.accept() => match r {
                 Ok((stream, addr)) => {
-                    if events.send(SessionEvent::Incoming(stream, addr)).await.is_err() {
+                    if events.send(SessionEvent::Incoming(stream, addr, None)).await.is_err() {
                         break;
                     }
                 }
@@ -509,11 +588,15 @@ impl Session {
                 self.add_candidates(addrs);
                 self.connect_more();
             }
-            SessionEvent::Incoming(stream, addr) => {
+            SessionEvent::Incoming(stream, addr, handshake) => {
                 if self.peers.len() >= self.config.max_peers || self.banned.contains(&addr) {
                     debug!(peer = %addr, "refusing incoming connection");
                 } else {
-                    self.spawn_peer(PeerTarget::Incoming(stream), addr, false);
+                    let target = match handshake {
+                        Some(hs) => PeerTarget::Routed(stream, hs),
+                        None => PeerTarget::Incoming(stream),
+                    };
+                    self.spawn_peer(target, addr, false);
                 }
             }
             SessionEvent::PeerConnected { key, peer_id } => self.on_connected(key, peer_id),
@@ -1055,6 +1138,7 @@ impl Session {
             .iter()
             .fold((0u64, 0u64), |(a, b), (x, y)| (a + x, b + y));
         let progress = Progress {
+            name: self.torrent.name.clone(),
             total: self.torrent.total_length,
             verified_bytes: self.picker.verified_bytes(),
             pieces_done: self.picker.verified_count(),
